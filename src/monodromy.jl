@@ -4,7 +4,7 @@ export monodromy_solve, realsolutions, nreal, parameters
 #####################
 # Monodromy Options #
 #####################
-const monodromy_options_allowed_keywords = [:distance, :identical_tol, :done_callback,
+const monodromy_options_supported_keywords = [:distance, :identical_tol, :done_callback,
     :group_action,:group_actions, :group_action_on_all_nodes,
     :parameter_sampler, :equivalence_classes, :complex_conjugation, :check_startsolutions,
     :target_solutions_count, :timeout,
@@ -108,7 +108,7 @@ Base.show(io::IO, ::MIME"application/prs.juno.inline", S::MonodromyStatistics) =
 
 # update routines
 function trackedpath!(stats::MonodromyStatistics, retcode)
-    if retcode == PathTrackerStatus.success
+    if retcode == CoreTrackerStatus.success
         stats.ntrackedpaths += 1
     else
         stats.ntrackingfailures += 1
@@ -174,7 +174,7 @@ function Node(p::AbstractVector{T}, node::Node{T,UP}, options::MonodromyOptions;
     if store_points == false
         Node{T, UP}(Vector(p), nothing, is_main_node)
     else
-        Node{T, UP}(Vector(p), UniquePoints(UP, options.distance_function; group_actions = options.group_actions, check_real = true), is_main_node)
+        Node{T, UP}(Vector(p), similar(UP), is_main_node)
     end
 end
 
@@ -349,22 +349,22 @@ end
 Track `x` along the edge `edge` in the loop `loop` using `tracker`. Record statistics
 in `stats`.
 """
-function track(tracker::PathTracker, x::AbstractVector, edge::Edge, loop::Loop, stats::MonodromyStatistics)
+function track(tracker::CoreTracker, x::AbstractVector, edge::Edge, loop::Loop, stats::MonodromyStatistics)
     set_parameters!(tracker, edge, loop)
     track(tracker, x, stats)
 end
-function track(tracker::PathTracker, x::AbstractVector, stats::MonodromyStatistics)
+function track(tracker::CoreTracker, x::AbstractVector, stats::MonodromyStatistics)
     retcode = track!(tracker, x, 1.0, 0.0)
     trackedpath!(stats, retcode)
     retcode
 end
 
 """x
-    set_parameters!(tracker::PathTracker, e::Edge, loop::Loop)
+    set_parameters!(tracker::CoreTracker, e::Edge, loop::Loop)
 
 Setup the parameters in the ParameterHomotopy in `tracker` to fit the edge `e`.
 """
-function set_parameters!(tracker::PathTracker, e::Edge, loop::Loop)
+function set_parameters!(tracker::CoreTracker, e::Edge, loop::Loop)
     H = basehomotopy(tracker.homotopy)
     if !(H isa ParameterHomotopy)
         error("Base homotopy is not a ParameterHomotopy")
@@ -498,11 +498,11 @@ parameters(r::MonodromyResult) = r.parameters
 ## monodromy solve ##
 #####################
 """
-MonodromyCache{FT<:FixedHomotopy, Tracker<:PathTracker, NC<:NewtonCache}
+MonodromyCache{FT<:FixedHomotopy, Tracker<:CoreTracker, NC<:NewtonCache}
 
 Cache for monodromy loops.
 """
-struct MonodromyCache{FT<:FixedHomotopy, Tracker<:PathTracker, NC<:NewtonCache, AV<:AbstractVector}
+struct MonodromyCache{FT<:FixedHomotopy, Tracker<:CoreTracker, NC<:NewtonCache, AV<:AbstractVector}
     F::FT
     tracker::Tracker
     newton_cache::NC
@@ -533,34 +533,30 @@ by monodromy techniques. This makes loops in the parameter space of `F` to find 
 * `timeout=float(typemax(Int))`: The maximal number of *seconds* the computation is allowed to run.
 * `minimal_number_of_solutions`: The minimal number of solutions before a stopping heuristic is applied. By default this is half of `target_solutions_count` if applicable otherwise 2.
 """
-function monodromy_solve(F::Vector{<:MP.AbstractPolynomialLike}, solution::Vector{<:Number}, p₀::AbstractVector{TP}; kwargs...) where {TP}
+function monodromy_solve(F::Inputs, solution::Vector{<:Number}, p₀::AbstractVector{TP}; kwargs...) where {TP}
     monodromy_solve(F, [solution], p₀; kwargs...)
 end
-function monodromy_solve(F::Vector{<:MP.AbstractPolynomialLike}, solutions::Vector{<:AbstractVector{<:Number}}, p₀::AbstractVector{TP}; kwargs...) where {TP}
+function monodromy_solve(F::Inputs, solutions::Vector{<:AbstractVector{<:Number}}, p₀::AbstractVector{TP}; kwargs...) where {TP}
     monodromy_solve(F, static_solutions(solutions), p₀; kwargs...)
 end
-function monodromy_solve(F::Vector{<:MP.AbstractPolynomialLike{TC}},
+function monodromy_solve(F::Inputs,
         startsolutions::Vector{<:SVector{NVars, <:Complex}},
         p::AbstractVector{TP};
-        parameters=throw(ArgumentError("You need to provide `parameters=...` to monodromy")),
-        strategy=default_strategy(F, parameters, p),
+        parameters=nothing,
+        strategy=nothing,
         showprogress=true,
-        kwargs...) where {TC, TP, NVars}
+        kwargs...) where {TP, NVars}
 
-    if length(p) ≠ length(parameters)
+    if parameters !== nothing && length(p) ≠ length(parameters)
         throw(ArgumentError("Number of provided parameters doesn't match the length of initially provided parameter `p₀`."))
     end
 
     p₀ = Vector{promote_type(Float64, TP)}(p)
 
-    optionskwargs, restkwargs = splitkwargs(kwargs, monodromy_options_allowed_keywords)
-    options = begin
-        isrealsystem = TC <: Real && TP <: Real
-        MonodromyOptions(isrealsystem; optionskwargs...)
-    end
+    optionskwargs, restkwargs = splitkwargs(kwargs, monodromy_options_supported_keywords)
 
     # construct tracker
-    tracker = pathtracker(F; parameters=parameters, p₁=p₀, p₀=p₀, restkwargs...)
+    tracker = coretracker(F, startsolutions; parameters=parameters, generic_parameters=p₀, restkwargs...)
     if affine_tracking(tracker)
         HC = HomotopyWithCache(tracker.homotopy, tracker.state.x, 1.0)
         F₀ = FixedHomotopy(HC, 0.0)
@@ -570,6 +566,11 @@ function monodromy_solve(F::Vector{<:MP.AbstractPolynomialLike{TC}},
         HC = HomotopyWithCache(PatchedHomotopy(tracker.homotopy, patch_state), tracker.state.x, 1.0)
         F₀ = FixedHomotopy(HC, 0.0)
     end
+
+    # Check whether homotopy is real
+    isrealsystem = numerically_check_real(tracker.homotopy, tracker.state.x)
+
+    options = MonodromyOptions(isrealsystem; optionskwargs...)
     # construct cache
     newton_cache = NewtonCache(F₀, tracker.state.x)
     C =  MonodromyCache(F₀, tracker, newton_cache, copy(tracker.state.x))
@@ -597,6 +598,11 @@ function monodromy_solve(F::Vector{<:MP.AbstractPolynomialLike{TC}},
         println("None of the provided solutions is a valid start solution.")
         return MonodromyResult(:invalid_startvalue, Vector{SVector{length(startsolutions[1]),ComplexF64}}(), p₀, statistics)
     end
+
+    if strategy === nothing
+        strategy = default_strategy(F, parameters, p; isrealsystem=isrealsystem)
+    end
+
     # construct Loop
     loop = Loop(strategy, p₀, uniquepoints, options)
 
@@ -624,12 +630,20 @@ function monodromy_solve(F::Vector{<:MP.AbstractPolynomialLike{TC}},
     MonodromyResult(retcode, points(solutions(loop)), p₀, statistics)
 end
 
-function default_strategy(F::Vector{<:MP.AbstractPolynomialLike{TC}}, parameters, p₀::AbstractVector{TP}) where {TC,TP}
+function default_strategy(F::MPPolyInputs, parameters, p₀::AbstractVector{TP}; isrealsystem=false) where {TC,TP}
     # If F depends only linearly on the parameters a petal is sufficient
     if all(f -> last(minmaxdegree(f, parameters)) ≤ 1, F)
         Petal()
     # For a real system we should introduce some weights to avoid the discriminant
-    elseif TP <: Real && TC <: Real
+    elseif isrealsystem
+        Triangle(useweights=true)
+    else
+        Triangle(useweights=false)
+    end
+end
+function default_strategy(F::AbstractSystem, parameters, p₀; isrealsystem=false)
+    # For a real system we should introduce some weights to avoid the discriminant
+    if isrealsystem
         Triangle(useweights=true)
     else
         Triangle(useweights=false)
@@ -645,6 +659,17 @@ function static_solutions(V::Vector{<:AbstractVector{<:Complex{<:AbstractFloat}}
     SVector{N}.(V)
 end
 
+
+function numerically_check_real(H::AbstractHomotopy, x)
+    y = copy(x)
+    Random.randn!(y)
+    for i in eachindex(y)
+        y[i] = real(y[i]) + 0.0im
+    end
+    t = rand()
+    r = evaluate(H, y, t)
+    isapprox(LinearAlgebra.norm(imag.(r), Inf), 0.0, atol=1e-14)
+end
 
 #################
 ## Actual work ##
@@ -728,7 +753,7 @@ function verified_affine_vector(C::MonodromyCache, ŷ, x, options)
     result = newton!(C.out, C.F, ŷ, euclidean_norm, C.newton_cache,
                 tol=tol, miniters=1, maxiters=3, simplified_last_step=false)
 
-    if result.retcode == converged
+    if isconverged(result)
         return affine_chart(x, C.out)
     else
         return nothing
@@ -740,8 +765,8 @@ affine_chart(x::SVector{N, T}, y::AbstractVector) where {N, T} = SVector{N,T}(y)
 
 function process!(queue::Vector{<:Job}, job::Job, C::MonodromyCache, loop::Loop, options::MonodromyOptions, stats::MonodromyStatistics, progress)
     retcode = track(C.tracker, job.x, job.edge, loop, stats)
-    if retcode ≠ PathTrackerStatus.success
-        if retcode == PathTrackerStatus.terminated_invalid_startvalue && stats.ntrackedpaths == 0
+    if retcode ≠ CoreTrackerStatus.success
+        if retcode == CoreTrackerStatus.terminated_invalid_startvalue && stats.ntrackedpaths == 0
             return :invalid_startvalue
         end
         return :incomplete
