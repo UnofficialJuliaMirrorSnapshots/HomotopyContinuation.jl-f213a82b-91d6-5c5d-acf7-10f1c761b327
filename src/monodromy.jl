@@ -382,6 +382,7 @@ struct MonodromyResult{N, T1, T2}
     solutions::Vector{SVector{N, T1}}
     parameters::Vector{T2}
     statistics::MonodromyStatistics
+    equivalence_classes::Bool
 end
 
 Base.iterate(R::MonodromyResult) = iterate(R.solutions)
@@ -391,7 +392,11 @@ Base.show(io::IO, ::MIME"application/prs.juno.inline", x::MonodromyResult) = x
 function Base.show(io::IO, result::MonodromyResult{N, T}) where {N, T}
     println(io, "MonodromyResult")
     println(io, "==================================")
-    println(io, "• $(nsolutions(result)) solutions ($(nreal(result)) real)")
+    if result.equivalence_classes
+        println(io, "• $(nsolutions(result)) classes of solutions (modulo group action) ($(nreal(result)) real)")
+    else
+        println(io, "• $(nsolutions(result)) solutions ($(nreal(result)) real)")
+    end
     println(io, "• return code → $(result.returncode)")
     println(io, "• $(result.statistics.ntrackedpaths) tracked paths")
 end
@@ -404,13 +409,21 @@ TreeViews.treelabel(io::IO, x::MonodromyResult, ::MIME"application/prs.juno.inli
 
 function TreeViews.nodelabel(io::IO, x::MonodromyResult, i::Int, ::MIME"application/prs.juno.inline")
     if i == 1
-        print(io, "Solutions")
+        if x.equivalence_classes
+            print(io, "$(nsolutions(x)) classes of solutions (modulo group action)")
+        else
+            print(io, "$(nsolutions(x)) solutions")
+        end
     elseif i == 2
-        print(io, "Real solutions")
+        if x.equivalence_classes
+            print(io, "$(nreal(x)) classes of real solutions")
+        else
+            print(io, "$(nreal(x)) real solutions")
+        end
     elseif i == 3
-        print(io, "Return Code")
+        print(io, "Return code")
     elseif i == 4
-        print(io, "Tracked Paths")
+        print(io, "Tracked paths")
     elseif i == 5
         print(io, "Parameters")
     end
@@ -522,7 +535,7 @@ by monodromy techniques. This makes loops in the parameter space of `F` to find 
 * `maximal_number_of_iterations_without_progress::Int=10`: The maximal number of iterations (i.e. loops generated) without any progress.
 * `group_action=nothing`: A function taking one solution and returning other solutions if there is a constructive way to obtain them, e.g. by symmetry.
 * `strategy`: The strategy used to create loops. If `F` only depends linearly on `p` this will be [`Petal`](@ref). Otherwise this will be [`Triangle`](@ref) with weights if `F` is a real system.
-* `showprogress=true`: Enable a progress meter.
+* `show_progress=true`: Enable a progress meter.
 * `distance_function=euclidean_distance`: The distance function used for [`UniquePoints`](@ref).
 * `identical_tol::Float64=1e-6`: The tolerance with which it is decided whether two solutions are identical.
 * `group_actions=nothing`: If there is more than one group action you can use this to chain the application of them. For example if you have two group actions `foo` and `bar` you can set `group_actions=[foo, bar]`. See [`GroupActions`](@ref) for details regarding the application rules.
@@ -544,8 +557,11 @@ function monodromy_solve(F::Inputs,
         p::AbstractVector{TP};
         parameters=nothing,
         strategy=nothing,
-        showprogress=true,
+        show_progress=true,
+        showprogress=nothing, #deprecated
         kwargs...) where {TP, NVars}
+
+    @deprecatekwarg showprogress show_progress
 
     if parameters !== nothing && length(p) ≠ length(parameters)
         throw(ArgumentError("Number of provided parameters doesn't match the length of initially provided parameter `p₀`."))
@@ -595,8 +611,10 @@ function monodromy_solve(F::Inputs,
     end
     statistics = MonodromyStatistics(uniquepoints)
     if  length(points(uniquepoints)) == 0
-        println("None of the provided solutions is a valid start solution.")
-        return MonodromyResult(:invalid_startvalue, Vector{SVector{length(startsolutions[1]),ComplexF64}}(), p₀, statistics)
+        @warn "None of the provided solutions is a valid start solution."
+        return MonodromyResult(:invalid_startvalue,
+                Vector{SVector{length(startsolutions[1]),ComplexF64}}(), p₀, statistics,
+                options.equivalence_classes)
     end
 
     if strategy === nothing
@@ -608,7 +626,7 @@ function monodromy_solve(F::Inputs,
 
     # solve
     retcode = :not_assigned
-    if showprogress
+    if show_progress
         if !options.equivalence_classes
             progress = ProgressMeter.ProgressUnknown("Solutions found:")
         else
@@ -627,7 +645,7 @@ function monodromy_solve(F::Inputs,
         end
     end
     finished!(statistics, nsolutions(loop))
-    MonodromyResult(retcode, points(solutions(loop)), p₀, statistics)
+    MonodromyResult(retcode, points(solutions(loop)), p₀, statistics, options.equivalence_classes)
 end
 
 function default_strategy(F::MPPolyInputs, parameters, p₀::AbstractVector{TP}; isrealsystem=false) where {TC,TP}

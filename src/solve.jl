@@ -85,10 +85,10 @@ The input `parameters` specifies the parameter variables of `F`
 which should be considered as parameters.
 Necessarily we have `length(parameters) == length(p₁) == length(p₀)`.
 
-    solve(F, startsolutions; parameters, startparameters, targetparameters, startgamma=nothing, targetgamma=nothing)
+    solve(F, startsolutions; parameters, start_parameters, target_parameters, start_gamma=nothing, target_gamma=nothing)
 
-This is a non-unicode variant where `γ₁=startparameters`, `γ₀=targetparameters`,
-    `γ₁=startgamma`, γ₀=`targetgamma`.
+This is a non-unicode variant where `γ₁=start_parameters`, `γ₀=target_parameters`,
+    `γ₁=start_gamma`, γ₀=`target_gamma`.
 
 ### Example
 We want to solve a parameter homotopy ``H(x,t) := F(x; t[1, 0]+(1-t)[2, 4])`` where
@@ -103,7 +103,7 @@ F = [x[1]^2-a[1], x[1]*x[2]-a[1]+a[2]]
 startsolutions = [[1, 1]]
 solve(F, startsolutions; parameters=a, p₁=p₁, p₀=p₀)
 # If you don't like unicode this is also possible
-solve(F, startsolutions, parameters=a, startparameters=p₁, targetparameters=p₀)
+solve(F, startsolutions, parameters=a, start_parameters=p₁, target_parameters=p₀)
 ```
 
 # Abstract Homotopy
@@ -122,33 +122,36 @@ if the third variable is the homogenization variable.
 General options:
 
 * `seed::Int`: The random seed used during the computations.
-* `report_progress=true`: Whether a progress bar should be printed to standard out.
+* `show_progress=true`: Whether a progress bar should be printed to standard out.
 * `threading=true`: Enable or disable multi-threading.
 * `path_result_details=:default`: The amount of information computed in each path result. Possible values are `:minimal` (minimal details), `:default` (default) and `:extensive` (all information possible).
 * `homvar::Union{Int,MultivariatePolynomials.AbstractVariable}`: This considers the *homogeneous* system `F` as an affine system which was homogenized by `homvar`. If `F` is an `AbstractSystem` `homvar` is the index (i.e. `Int`) of the homogenization variable. If `F` is an `AbstractVariables` (e.g. created by `@polyvar x`) `homvar` is the actual variable used in the system `F`.
 * `system::AbstractSystem`: A constructor to assemble a [`AbstractSystem`](@ref). The default is [`SPSystem`](@ref). This constructor is only applied to the input of `solve`. The constructor is called with `system(polynomials, variables)` where `polynomials` is a vector of `MultivariatePolynomials.AbstractPolynomial`s and `variables` determines the variable ordering. If you experience significant compilation times, consider to change system to `FPSystem`.
 * `homotopy::AbstractHomotopy`: A constructor to construct a [`AbstractHomotopy`](@ref) for the totaldegree and start target homotopy. The default is [`StraightLineHomotopy`](@ref). The constructor is called with `homotopy(start, target)` where `start` and `target` are homogeneous [`AbstractSystem`](@ref)s.
 * `affine_tracking::Bool=false`: Indicate whether path tracking should happen in affine space rather than projective space. Currently this is only supported for parameter homotopies.
+* `path_jumping_check::Bool=true`: Enable a check whether one of the paths jumped to another one.
 
 Path tracking specific options:
 
 * `corrector::AbstractCorrector`: The corrector used during in the predictor-corrector scheme. The default is [`NewtonCorrector`](@ref).
 * `max_corrector_iters=3`: The maximal number of correction steps in a single step.
 * `initial_step_size=0.1`: The step size of the first step.
-* `max_steps=10_000`: The maximal number of iterations the path tracker has available.
-* `min_step_size =1e-14`: The minimal step size.
-* `max_step_size =Inf`: The maximal step size.
+* `max_steps=1_000`: The maximal number of iterations the path tracker has available.
+* `min_step_size=1e-14`: The minimal step size.
+* `max_step_size=Inf`: The maximal step size.
 * `maximal_lost_digits::Real=-(log₁₀(eps) + 3)`: The tracking is terminated if we estimate that we loose more than `maximal_lost_digits` in the linear algebra steps.
 * `predictor::AbstractPredictor`: The predictor used during in the predictor-corrector scheme. The default is [`Heun`](@ref)()`.
 * `max_refinement_iters=10`: The maximal number of correction steps used to refine the final value.
 * `refinement_accuracy=1e-8`: The precision used to refine the final value.
 * `accuracy=1e-7`: The precision used to track a value.
 * `auto_scaling=true`: This only applies if we track in affine space. Automatically regauges the variables to effectively compute with a relative accuracy instead of an absolute one.
+* `overdetermined_min_accuracy=1e-5`: The minimal accuracy a non-singular solution needs to have to be considered a solution of the original system.
+* `overdetermined_min_residual=1e-3`: The minimal residual a singular solution needs to have to be considered a solution of the original system.
 
 Endgame specific options:
 
 * `at_infinity_check::Bool=true`: Whether the path tracker should stop paths going to infinity early.
-* `max_step_size_endgame_start::Float64=1e-6`: The endgame only starts if the step size becomes smaller that the provided value.
+* `min_step_size_endgame_start=1e-10`: The endgame only starts if the step size becomes smaller that the provided value.
 * `samples_per_loop::Int=5`: To compute singular solutions Cauchy's integral formula is used. The accuracy of the solutions increases with the number of samples per loop.
 * `max_winding_number::Int=12`: The maximal number of loops used in Cauchy's integral formula.
 * `max_affine_norm::Float64=1e6`: A fallback heuristic to decide whether a path is going to infinity.
@@ -156,7 +159,10 @@ Endgame specific options:
 """
 function solve end
 
-const solve_supported_keywords = [:threading, :report_progress, :path_result_details, :save_all_paths]
+const solve_supported_keywords = [:threading, :show_progress,
+            :path_result_details, :save_all_paths, :path_jumping_check,
+            # deprecated
+            :report_progress]
 
 function solve(args...; kwargs...)
     solve_kwargs, rest = splitkwargs(kwargs, solve_supported_keywords)
@@ -164,103 +170,166 @@ function solve(args...; kwargs...)
     solve(tracker, start_solutions; solve_kwargs...)
 end
 
-function solve(tracker::PathTracker, start_solutions; path_result_details=:default, save_all_paths=false, kwargs...)
+function solve(tracker::PathTracker, start_solutions;
+        path_result_details=:default, save_all_paths=false,
+        path_jumping_check=true, kwargs...)
     results = track_paths(tracker, start_solutions; path_result_details=path_result_details, save_all_paths=save_all_paths, kwargs...)
-    path_jumping_check!(results, tracker, path_result_details; finite_results_only=!save_all_paths)
+    if path_jumping_check
+        path_jumping_check!(results, tracker, path_result_details; finite_results_only=!save_all_paths)
+    end
     Result(results, length(start_solutions), tracker.problem.seed)
 end
 
+mutable struct SolveStats
+    regular::Int
+    regular_real::Int
+    singular::Int
+    singular_real::Int
+end
+SolveStats() = SolveStats(0,0,0,0)
 
-function track_paths(tracker, start_solutions; threading=true, report_progress=true, path_result_details::Symbol=:default, save_all_paths=false)
+function track_paths(tracker, start_solutions;
+                threading=true, show_progress=true,
+                path_result_details::Symbol=:default, save_all_paths=false,
+                # deprecated
+                report_progress=nothing)
     results = Vector{result_type(tracker)}()
     n = length(start_solutions)
 
-    if report_progress
+    @deprecatekwarg report_progress show_progress
+
+    if show_progress
         progress = ProgressMeter.Progress(n, 0.1, "Tracking $n paths... ")
     else
         progress = nothing
     end
 
-    nthreads = Threads.nthreads()
-    if threading && nthreads > 1
-        # TODO: We can probably also do this better, but for now we have to collect
-        # to support indexing
-        S = collect(start_solutions)
+    stats = SolveStats()
 
-        chunk_size = 32
-        batch_tracker = BatchTracker(tracker, S, chunk_size, path_result_details, save_all_paths)
-        k = 1
-        while k ≤ n
-            prepare_batch!(batch_tracker, k)
-            ccall(:jl_threading_run, Ref{Cvoid}, (Any,), batch_tracker)
+    try
+        nthreads = Threads.nthreads()
+        if threading && nthreads > 1
+            batch_size = 32 * nthreads
+            batches = BatchIterator(start_solutions, batch_size)
+            batch_tracker = BatchTracker(tracker, batches, path_result_details, save_all_paths)
+            k = 0
+            for batch in batches
+                prepare_batch!(batch_tracker, batch)
+                ccall(:jl_threading_run, Ref{Cvoid}, (Any,), batch_tracker)
 
-            for R in batch_tracker.results, i in 1:chunk_size
-                R[i] !== nothing && push!(results, R[i])
-                R[i] = nothing
+                for R in batch_tracker.results
+                    if R !== nothing
+                        push!(results, R)
+                        issuccess(R) && update!(stats, R)
+                    end
+                end
+                k += length(batch)
+                if batch_tracker.interrupted
+                    return results
+                end
+
+                update_progress!(progress, k, stats)
             end
-            k += batch_tracker.batch_size
+        else
+            for (k, s) in enumerate(start_solutions)
+                return_code = track!(tracker, s, 1.0)
+                if save_all_paths || return_code == PathTrackerStatus.success
+                    R = PathResult(tracker, s, k; details=path_result_details)
+                    push!(results, R)
 
-            update_progress!(progress, results, min(k - 1, n))
+                    if return_code == PathTrackerStatus.success
+                        update!(stats, R)
+                    end
+                end
+                k % 32 == 0 && update_progress!(progress, k, stats)
+            end
+            update_progress!(progress, n, stats)
         end
-    else
-        for (k, s) in enumerate(start_solutions)
-            return_code = track!(tracker, s, 1.0)
-            if save_all_paths || return_code == PathTrackerStatus.success
-                push!(results, PathResult(tracker, s, k; details=path_result_details))
-            end
-            k % 32 == 0 && update_progress!(progress, results, k)
+    catch e
+        if isa(e, InterruptException)
+            return results
+        else
+            rethrow(e)
         end
     end
     results
 end
 
-function update_progress!(progress, results, N)
-    ProgressMeter.update!(progress, N, showvalues=((:tracked, N),))
+function update!(stats::SolveStats, R::PathResult)
+    if issingular(R)
+        stats.singular_real += isreal(R)
+        stats.singular += 1
+    else
+        stats.regular_real += isreal(R)
+        stats.regular += 1
+    end
+end
+
+function update_progress!(progress, ntracked, stats::SolveStats)
+    progress === nothing && return nothing
+
+    nsols = stats.regular + stats.singular
+    nreal = stats.regular_real + stats.singular_real
+
+    ProgressMeter.update!(progress, ntracked, showvalues=(
+        ("# paths tracked", ntracked),
+        ("# non-singular solutions (real)", "$(stats.regular) ($(stats.regular_real))"),
+        ("# singular solutions (real)", "$(stats.singular) ($(stats.singular_real))"),
+        ("# total solutions (real)", "$nsols ($nreal)")
+    ))
     nothing
 end
-update_progress!(::Nothing, results, N) = nothing
 
 mutable struct BatchTracker{Tracker<:PathTracker, V, R} <: Function
-    results::Vector{Vector{Union{Nothing, R}}}
     trackers::Vector{Tracker}
+    results::Vector{Union{Nothing, R}}
     ranges::Vector{UnitRange{Int}}
-    start_solutions::V
+    batch::Vector{V}
     details::Symbol
     all_paths::Bool
-    batch_size::Int
+    interrupted::Bool
 end
 
-function BatchTracker(tracker::PathTracker, start_solutions, chunk_size::Int, path_result_details::Symbol, save_all_paths::Bool)
-    n = length(start_solutions)
-    batch_size = chunk_size * Threads.nthreads()
-    batch_results = Threads.resize_nthreads!([Vector{Union{Nothing, result_type(tracker)}}(undef, chunk_size)])
-    for R in batch_results
-        R .= nothing
-    end
-
+function BatchTracker(tracker::PathTracker, batches::BatchIterator, path_result_details::Symbol, save_all_paths::Bool)
     trackers = Threads.resize_nthreads!([tracker])
-    ranges = partition_work(1:min(batch_size, n), Threads.nthreads())
-    BatchTracker(batch_results, trackers, ranges, start_solutions, path_result_details, save_all_paths, batch_size)
+    batch_size = length(batches.batch)
+    batch_results = Vector{Union{Nothing, result_type(tracker)}}(undef, batch_size)
+    batch_results .= nothing
+    ranges = partition_work(1:batch_size, length(trackers))
+    BatchTracker(trackers, batch_results, ranges, batches.batch,
+                 path_result_details, save_all_paths, false)
 end
 
-function prepare_batch!(batch_tracker::BatchTracker, k::Int)
-    n = length(batch_tracker.start_solutions)
-    nthreads = length(batch_tracker.trackers)
-    partition_work!(batch_tracker.ranges, k:min(k+batch_tracker.batch_size-1, n), nthreads)
+function prepare_batch!(batch_tracker::BatchTracker, batch)
+    n = length(batch)
+    if length(batch_tracker.results) ≠ n
+        resize!(batch_tracker.results, n)
+    end
+    batch_tracker.results .= nothing
+
+    partition_work!(batch_tracker.ranges, 1:n, length(batch_tracker.trackers))
 end
 
 function (batch::BatchTracker)()
     tid = Threads.threadid()
-    track_batch!(batch.results[tid], batch.trackers[tid],
-                 batch.ranges[tid], batch.start_solutions, batch.details, batch.all_paths)
+    try
+        track_batch!(batch.results, batch.trackers[tid], batch.ranges[tid],
+                 batch.batch, batch.details, batch.all_paths)
+     catch e
+         if isa(e, InterruptException)
+             batch.interrupted = true
+         else
+             rethrow(e)
+         end
+     end
 end
 function track_batch!(results, pathtracker, range, starts, details, all_paths)
-    for (i, k) in enumerate(range)
+    for k in range
         return_code = track!(pathtracker, starts[k], 1.0)
         if all_paths || return_code == PathTrackerStatus.success
-            results[i] = PathResult(pathtracker, starts[k], k; details=details)
+            results[k] = PathResult(pathtracker, starts[k], k; details=details)
         else
-            results[i] = nothing
+            results[k] = nothing
         end
     end
     nothing
@@ -288,31 +357,57 @@ function path_jumping_check!(results::Vector{<:PathResult}, tracker::PathTracker
     !isempty(finite_results) || return results
 
     tol = tracker.core_tracker.options.refinement_accuracy
+    # find cluster of multiple solutions
     clusters = multiplicities(solution, finite_results; tol=tol)
+
     while true
+        rerun_paths = false
         for cluster in clusters
             m = length(cluster)
-            all_same_winding_number = true
-            for i in m
-                if unpack(finite_results[i].winding_number, 1) ≠ m
-                    all_same_winding_number = false
+            # We have to consider a couple of cases
+            # 1) All m solutions in the cluster also have winding number m
+            #    -> Everything OK
+            # 2) We find two non-singular solutions (winding_number === nothing)
+            #    in the same cluster
+            #    -> Path jumping happened
+            # 3) There can be multiple paths going to the same solution, i.e.,
+            #    winding number | m
+            #    -> OK
+            # 4) It can happen that paths going to a positive dimensional component
+            #    have the same endpoint and still winding number = 1.
+            #
+            # This is quite complicated to tear apart. Therefore we focus for
+            # now only on case 2)
+
+            jumping = false
+            for i in cluster
+                cond = unpack(finite_results[i].condition_jacobian, 1.0)
+                w = unpack(finite_results[i].winding_number, 0)
+                if w == 0 && cond < 1e12
+                    jumping = true
                     break
                 end
             end
-            if !all_same_winding_number
+
+
+            if jumping
+                rerun_paths = true
                 # rerun
                 for i in cluster
                     rᵢ = finite_results[i]
-                    new_rᵢ = track(tracker, start_solution(rᵢ), 1.0; path_number=rᵢ.path_number,
+                    new_rᵢ = track(tracker, start_solution(rᵢ);
+                                            path_number=rᵢ.path_number,
                                             details=details,
-                                            accuracy=min(1e-8, accuracy(tracker.core_tracker)),
+                                            accuracy=min(1e-7, accuracy(tracker.core_tracker)),
                                             max_corrector_iters=1)
                     finite_results[i] = new_rᵢ
                     results[finite_results_indices[i]] = new_rᵢ
-
                 end
             end
         end
+
+        rerun_paths || break
+
         prev_clusters = clusters
         clusters = multiplicities(solution, finite_results; tol=tol)
         if clusters == prev_clusters

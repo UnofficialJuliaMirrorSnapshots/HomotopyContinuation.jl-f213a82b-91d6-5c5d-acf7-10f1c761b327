@@ -9,7 +9,7 @@
 
 ---
 
-### **For installation instructions, full content overview and detailed documentation, see [juliahomotopycontinuation.org](https://www.juliahomotopycontinuation.org).**
+### **See [juliahomotopycontinuation.org](https://www.juliahomotopycontinuation.org) for installation instructions, full content overview and detailed documentation.**
 
 ---
 
@@ -22,12 +22,11 @@ using HomotopyContinuation
 @polyvar x y; # declare the variables x and y
 result = solve([x^2+2y, y^2-2])
 ```
-https://github.com/JuliaHomotopyContinuation/HomotopyContinuation.jl
 ```
 Result with 4 solutions
 ==================================
-• 4 non-singular finite solutions (2 real)
-• 0 singular finite solutions (0 real)
+• 4 non-singular solutions (2 real)
+• 0 singular solutions (0 real)
 • 4 paths tracked
 • random seed: 902575
 ```
