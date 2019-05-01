@@ -702,6 +702,9 @@ function remove_zeros!(C::Composition)
     C
 end
 
+permute(F::MPPolys, perm) = F[perm]
+permute(C::Composition, perm) = Composition([[C.polys[1][perm]]; C.polys[2:end]])
+
 """
     check_zero_dimensional(F::Vector{<:MP.AbstractPolynomial})
 
@@ -807,9 +810,9 @@ exponent(term::MP.AbstractTermLike, vars) = [MP.degree(term, v) for v in vars]
 
 function coefficient_dot(f::MP.AbstractPolynomialLike{T}, g::MP.AbstractPolynomialLike{S}, vars=variables([f, g])) where {T,S}
     if f === g
-        return sum(t -> abs2(MP.coefficient(t)), f)
+        return sum(t -> abs2(float(MP.coefficient(t))), f)
     end
-    result = zero(promote_type(T,S))
+    result = zero(promote_type(T,S, Float64))
     for term_f in f
         c_f = MP.coefficient(term_f)
         exp_f = exponent(term_f, vars)
