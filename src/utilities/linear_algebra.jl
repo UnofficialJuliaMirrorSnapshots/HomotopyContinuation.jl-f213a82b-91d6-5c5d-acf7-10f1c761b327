@@ -85,10 +85,11 @@ function Jacobian(A::AbstractMatrix, corank::Int=0)
     ormqr_work = Vector{ComplexF64}(undef, 1)
     rwork = Vector{Float64}(undef, 2n)
     jpvt = zeros(BlasInt, n)
-    tau = similar(A, min(m, n))
-    qr = LinearAlgebra.QRPivoted(geqp3!(copy(A), jpvt, tau, work, rwork)...)
+    B = ComplexF64.(A)
+    tau = similar(B, min(m, n))
+    qr = LinearAlgebra.QRPivoted(geqp3!(B, jpvt, tau, work, rwork)...)
     active_factorization = lu === nothing ? QR_FACTORIZATION : LU_FACTORIZATION
-    J = copy(A)
+    J = copy(B)
     D = ones(m)
     r = similar(J, size(J, 1))
     b = copy(r)
@@ -143,7 +144,8 @@ function updated_jacobian!(Jac::Jacobian{T}; update_infos::Bool=false) where {T}
             Jac.corank = rnm
         else
             for i in 2:rnm
-                if ε * r₁ > abs(real(Jac.qr.factors[i,i]))
+                rᵢ = abs(real(Jac.qr.factors[i,i]))
+                if ε * r₁ > rᵢ
                     Jac.corank = rnm - i + 1
                     break
                 end
@@ -433,6 +435,7 @@ function geqp3!(A::AbstractMatrix{ComplexF64},
 	if lda == 0
 		return return A, tau, jpvt
 	end # Early exit
+    jpvt .= BlasInt(0)
 	lwork = BlasInt(-1)
 	info = Ref{BlasInt}()
 	for i = 1:2
