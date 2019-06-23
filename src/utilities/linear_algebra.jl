@@ -1,3 +1,6 @@
+import DoubleFloats: Double64
+
+
 issquare(A::AbstractMatrix) = isequal(size(A)...)
 
 """
@@ -70,6 +73,7 @@ mutable struct Jacobian{T}
     ormqr_work::Vector{ComplexF64}
     # Numerical Informations
     corank::Int # The numerical corank
+    corank_proposal::Int
     cond::Float64 # Estimate of the Jacobian
     # The relative number of digits lost during the solution of the linear systems
     # in Newton's method. See `solve_with_digits_lost!` in utilities/linear_algebra.jl
@@ -79,7 +83,7 @@ end
 
 function Jacobian(A::AbstractMatrix, corank::Int=0)
     m, n = size(A)
-    lu = m ≠ n ? nothing : LinearAlgebra.lu(A)
+    lu = m ≠ n ? nothing : LinearAlgebra.lu!(Random.randn!(similar(A)))
 
     work = Vector{ComplexF64}(undef, 1)
     ormqr_work = Vector{ComplexF64}(undef, 1)
@@ -97,7 +101,20 @@ function Jacobian(A::AbstractMatrix, corank::Int=0)
     cond = 1.0
     digits_lost = nothing
     Jacobian(J, D, lu, qr, active_factorization, b, r, perm, work, rwork, ormqr_work,
-        corank, cond, digits_lost)
+        corank, 0, cond, digits_lost)
+end
+
+function update_rank!(Jac::Jacobian)
+    # if Jac.corank_proposal < Jac.corank
+    #     Jac.corank = Jac.corank_proposal
+    # elseif Jac.corank_proposal > Jac.corank == 0 && issquare(Jac.J)
+    #     if unpack(Jac.digits_lost, 0.0) > maximal_lost_digits
+    #         Jac.corank = Jac.corank_proposal
+    #     end
+    # else
+    Jac.corank = Jac.corank_proposal
+    # end
+    Jac
 end
 
 """
@@ -117,7 +134,7 @@ end
 This computes a factorization of the stored Jacobian matrix.
 Call this instead of `update!` if `jacobian.J` got updated.
 """
-function updated_jacobian!(Jac::Jacobian{T}; update_infos::Bool=false) where {T}
+function updated_jacobian!(Jac::Jacobian{ComplexF64}; update_infos::Bool=false) where {T}
     if !update_infos && issquare(Jac.J) && Jac.corank == 0
         Jac.lu !== nothing || return Jac
         copyto!(Jac.lu.factors, Jac.J)
@@ -130,29 +147,32 @@ function updated_jacobian!(Jac::Jacobian{T}; update_infos::Bool=false) where {T}
         if m == n
             # only apply row scaling for square matrices since
             # otherwise we change the problem
-            row_scaling!(Jac.qr.factors, Jac.D)
+            row_scaling!(Jac.qr.factors, Jac.D, 1e-6)
         end
         # this computes a pivoted qr factorization, i.e.,
         # qr!(Jac.qr.factors, Val(true)) but without allocating new memory
         geqp3!(Jac.qr.factors, Jac.qr.jpvt, Jac.qr.τ, Jac.qr_work, Jac.qr_rwork)
 
-        ε = max(n,m) * eps(real(T)) * 100
+        ε = max(n,m) * eps() * 10
         # check rank 0
         rnm = min(n,m)
         r₁ = abs(real(Jac.qr.factors[1,1]))
+        corank = 0
         if r₁ < ε
-            Jac.corank = rnm
+            corank = rnm
+            Jac.cond = inv(ε)
         else
             for i in 2:rnm
                 rᵢ = abs(real(Jac.qr.factors[i,i]))
                 if ε * r₁ > rᵢ
-                    Jac.corank = rnm - i + 1
+                    corank = rnm - i + 1
                     break
                 end
             end
+            Jac.cond = max(1.0, r₁) / abs(real(Jac.qr.factors[rnm, rnm]))
         end
-        # compute subcondition number
-        Jac.cond = r₁ / abs(real(Jac.qr.factors[rnm, rnm]))
+        Jac.corank_proposal = corank
+
         Jac.active_factorization = QR_FACTORIZATION
     end
     Jac
@@ -164,7 +184,8 @@ end
 Solve `Jac.J * x = b` inplace. Assumes `Jac` contains already the correct factorization.
 This stores the result in `x`.
 """
-function solve!(x, Jac::Jacobian, b::AbstractVector; update_digits_lost=false)
+function solve!(x, Jac::Jacobian, b::AbstractVector; update_digits_lost::Bool=false, refinement_step::Bool=false)
+    # @show Jac.active_factorization
     if Jac.active_factorization == LU_FACTORIZATION
         lu = Jac.lu
         if lu !== nothing
@@ -182,7 +203,7 @@ function solve!(x, Jac::Jacobian, b::AbstractVector; update_digits_lost=false)
             custom_ldiv!(x, Jac.qr, Jac.b, Jac.corank, Jac.perm, Jac.ormqr_work )
         end
     end
-    if issquare(Jac.J) && Jac.corank == 0 && update_digits_lost
+    if issquare(Jac.J) && Jac.corank == 0 && update_digits_lost && !refinement_step
         norm_x = euclidean_norm(x)
         norm_δx = iterative_refinement_step!(x, Jac, b)
         Jac.digits_lost = log₁₀(norm_δx / eps(norm_x))
@@ -225,7 +246,7 @@ function custom_ldiv!(x, A::LinearAlgebra.QRPivoted{ComplexF64},
         # The following is equivalent to LA.lmul!(LA.adjoint(A.Q), b) but
         # we can also pass the preallocated work vector
         ormqr!('L', 'C', A.factors, A.τ, b, ormqr_work)
-        ldiv_upper!(A.factors, b)
+        ldiv_upper!(A.factors, b; singular_exception=false)
         @inbounds for i in 1:nr
             x[i] = b[i]
             perm[i] = A.p[i]
@@ -256,7 +277,7 @@ Returns the euclidean norm of the update.
 """
 function iterative_refinement_step!(x, Jac::Jacobian, b, ::Type{T}=eltype(x)) where T
     residual!(Jac.r, Jac.J, x, b, T)
-    δx = solve!(Jac, Jac.r)
+    δx = solve!(Jac.r, Jac, Jac.r; refinement_step=true)
     norm_δx = euclidean_norm(δx)
     @inbounds for i in eachindex(x)
         x[i] = convert(T, x[i]) - convert(T, δx[i])
@@ -392,10 +413,10 @@ function _swap_rows!(B::StridedVector, i::Integer, j::Integer)
     B
 end
 
-@inline function ldiv_upper!(A::AbstractMatrix, b::AbstractVector, x::AbstractVector = b)
+@inline function ldiv_upper!(A::AbstractMatrix, b::AbstractVector, x::AbstractVector = b; singular_exception::Bool=true)
     n = size(A, 2)
     for j in n:-1:1
-        @inbounds iszero(A[j,j]) && throw(LinearAlgebra.SingularException(j))
+        @inbounds singular_exception && iszero(A[j,j]) && throw(LinearAlgebra.SingularException(j))
         @inbounds xj = x[j] = (@fastmath A[j,j] \ b[j])
         for i in 1:(j-1)
             @inbounds b[i] -= A[i,j] * xj
@@ -501,4 +522,94 @@ function ormqr!(side::AbstractChar, trans::AbstractChar, A::Matrix{ComplexF64},
         end
     end
     C
+end
+
+"""
+    hnf(A, T=elytpe(A))
+
+    Compute the hermite normal form `H` of `A` by overwriting `A` and the corresponding transformation
+    matrix `U` using precision T. This is `A*U == H` and `H` is a lower triangular matrix.
+
+    The implementation follows the algorithm described in [1].
+
+    [1] Kannan, Ravindran, and Achim Bachem. "Polynomial algorithms for computing the Smith and Hermite normal forms of an integer matrix." SIAM Journal on Computing 8.4 (1979): 499-507.
+"""
+function hnf(A, T=eltype(A))
+    H = similar(A, T)
+    H .= A
+    U = similar(A, T)
+    hnf!(H, U)
+    H, U
+end
+
+# use checked arithmethic
+⊡(x,y) = Base.checked_mul(x, y)
+⊞(x,y) = Base.checked_add(x, y)
+
+"""
+    hnf!(H, U, A)
+
+Inplace version of [hnf](@ref).
+
+    hnf!(A, U)
+
+Inplace version of [hnf](@ref) overwriting `A` with `H`.
+"""
+hnf!(H, U, A) = hnf!(copyto!(H, A), U)
+function hnf!(A, U)
+    n = size(A, 1)
+    U .= 0
+    @inbounds for i in 1:n
+        U[i,i] = one(eltype(U))
+    end
+    @inbounds for i in 1:(n-1)
+        ii = i ⊞ 1
+        for j in 1:i
+            if !iszero(A[j, j]) || !iszero(A[j, ii])
+                # 4.1
+                r, p, q = gcdx(A[j, j], A[j, ii])
+                # @show r, p, q, A[j, j], A[j, ii]
+                # 4.2
+                d_j = -A[j, ii] ÷ r
+                d_ii = A[j, j] ÷ r
+                for k = 1:n
+                    a_kj, a_kii = A[k,j], A[k,ii]
+                    A[k, j] = a_kj ⊡ p ⊞ a_kii ⊡ q
+                    A[k, ii] = a_kj ⊡ d_j ⊞ a_kii ⊡ d_ii
+
+                    u_kj, u_kii = U[k,j], U[k,ii]
+                    U[k, j] = u_kj ⊡ p ⊞ u_kii ⊡ q
+                    U[k, ii] = u_kj ⊡ d_j ⊞ u_kii ⊡ d_ii
+                end
+            end
+            # 4.3
+            if j > 1
+                reduce_off_diagonal!(A, U, j)
+            end
+        end
+        #5
+        reduce_off_diagonal!(A, U, ii)
+    end
+
+    nothing
+end
+
+@inline function reduce_off_diagonal!(A, U, k)
+    n = size(A, 1)
+    @inbounds if A[k,k] < 0
+        for i in 1:n
+            A[i, k] = -A[i, k]
+            U[i, k] = -U[i, k]
+        end
+    end
+    @inbounds for z in 1:(k-1)
+        if !iszero(A[z,z])
+            r = -ceil(eltype(A), A[k,z] / A[z,z])
+            for i in 1:n
+                U[i,z] = U[i,z] ⊞ r ⊡ U[i,k]
+                A[i,z] = A[i,z] ⊞ r ⊡ A[i,k]
+            end
+        end
+    end
+    nothing
 end

@@ -5,7 +5,7 @@
         H = StraightLineHomotopy(F, G)
         @test H isa AbstractHomotopy
         @test size(H) == (6, 6)
-        @test gamma(H) isa ComplexF64
+        @test HC.gamma(H) isa ComplexF64
         HomotopyContinuation.homotopy_interface_test(H)
     end
 
@@ -74,6 +74,15 @@
         @test H isa AbstractHomotopy
         @test size(H) == (7, 6)
 
+        HomotopyContinuation.homotopy_interface_test(H, x)
+    end
+
+    @testset "Coefficient Homotopy" begin
+        E = [[2 1 0; 0 0 0], [1 0; 1 0]]
+        start = [[1.0+0im, -3.0, 2.0], [2.0+0im, -2.0]]
+        target = [[2.0+0im, -2.0, 5.0], [3.0+0im, -1.0]]
+        H = CoefficientHomotopy(E, start, target)
+        x = randn(ComplexF64, 2)
         HomotopyContinuation.homotopy_interface_test(H, x)
     end
 end

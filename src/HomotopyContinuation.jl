@@ -1,9 +1,12 @@
 module HomotopyContinuation
 
     import DynamicPolynomials
+    import ElasticArrays
     import FixedPolynomials
     import LinearAlgebra
+    import MixedSubdivisions
     import MultivariatePolynomials
+    import PrettyTables
     import Printf
     import ProgressMeter
     import ProjectiveVectors
@@ -38,6 +41,7 @@ module HomotopyContinuation
 
     include("core_tracker.jl")
     include("path_tracker.jl")
+    include("polyhedral.jl")
     include("solve.jl")
     include("monodromy.jl")
 
