@@ -43,20 +43,32 @@ GroupActions(actions) = GroupActions(actions...)
 
 function (actions::GroupActions)(s)
     S = [s]
+    T = typeof(s)
     apply_actions(actions, s) do sᵢ
-        push!(S, sᵢ)
-        false
+        sⱼ = convert(T,sᵢ)
+    	if sⱼ != s
+    		push!(S,sⱼ)
+    	end
+    	false
     end
     S
 end
 
 apply_actions(cb, action::GroupActions, s) = apply_actions(action.actions, s, cb)
 function apply_actions(actions::Tuple, x, cb)
-    f, rest = actions[1], Base.tail(actions)
-    for yᵢ in f(x)
-        cb(yᵢ) && return true
-        if apply_actions(rest, yᵢ, cb)
+    f, rest = first(actions), Base.tail(actions)
+    y = f(x)
+    if isa(x, AbstractVector{<:Number}) && isa(y, AbstractVector{<:Number})
+        cb(y) && return true
+        if apply_actions(rest, y, cb)
             return true
+        end
+    else
+        for yᵢ in f(x)
+            cb(yᵢ) && return true
+            if apply_actions(rest, yᵢ, cb)
+                return true
+            end
         end
     end
     apply_actions(rest, x, cb)

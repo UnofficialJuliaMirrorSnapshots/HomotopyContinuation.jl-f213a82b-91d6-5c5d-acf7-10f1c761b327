@@ -4,41 +4,28 @@ import DoubleFloats: Double64
 issquare(A::AbstractMatrix) = isequal(size(A)...)
 
 """
-    row_scaling!(A, tol=maximum(size(A))^2 * eps(real(eltype(A))))
+    row_scaling!(A, D::AbstractVector, tol=maximum(size(A))^2 * eps(real(eltype(A))))
 
 Divide each row of `A` by its ∞-norm. This minimizes the ∞ condition number
 for all possible scalings. In order to avoid scaling near zero rows back to
 1 we only scale a row if its ∞-norm is larger than `tol`.
 """
-function row_scaling!(A::AbstractMatrix{T}, tol=max(size(A)...)^2 * eps(real(T))) where {T}
-    @inbounds for i=1:size(A, 1)
-        rᵢ = abs(A[i, 1])
-        for j=2:size(A, 2)
-            rᵢ = max(rᵢ, abs(A[i, j]))
-        end
-        rᵢ > tol || continue
-        for j=1:size(A, 2)
-            A[i, j] /= rᵢ
-        end
-    end
-    A
-end
-
 function row_scaling!(A::AbstractMatrix{T}, D::AbstractVector, tol=max(size(A)...)^2 * eps(real(T))) where {T}
-    @inbounds for i=1:size(A, 1)
-        rᵢ = abs(A[i, 1])
-        for j=2:size(A, 2)
-            rᵢ = max(rᵢ, abs(A[i, j]))
-        end
-        if rᵢ < tol
-            D[i] = one(rᵢ)
-            continue
-        end
-        D[i] = rᵢ
+    D .= 0.0
+    d_max = convert(real(T), -Inf)
+    @inbounds for j=1:size(A, 2), i=1:size(A, 1)
+        D[i] = @fastmath max(D[i], abs(A[i,j]))
+        d_max = @fastmath max(d_max, D[i])
+    end
 
-        for j=1:size(A, 2)
-            A[i, j] /= rᵢ
-        end
+    # In the case that the row norms are all less than 1 we have a lower bound
+    # the maximal row norm
+    # To avoid that we scale a zero matrix, we need a tol for wich we don't scale any more
+    bound = clamp(d_max, tol, 1.0)
+    D .= max.(D, bound)
+
+    @inbounds for j=1:size(A, 2), i=1:size(A, 1)
+        A[i, j] /= D[i]
     end
     A
 end
@@ -105,16 +92,16 @@ function Jacobian(A::AbstractMatrix, corank::Int=0)
 end
 
 function update_rank!(Jac::Jacobian)
-    # if Jac.corank_proposal < Jac.corank
-    #     Jac.corank = Jac.corank_proposal
-    # elseif Jac.corank_proposal > Jac.corank == 0 && issquare(Jac.J)
-    #     if unpack(Jac.digits_lost, 0.0) > maximal_lost_digits
-    #         Jac.corank = Jac.corank_proposal
-    #     end
-    # else
     Jac.corank = Jac.corank_proposal
-    # end
     Jac
+end
+
+function reset!(jacobian::Jacobian)
+    jacobian.cond = 1.0
+    jacobian.corank = 0
+    jacobian.corank_proposal = 0
+    jacobian.digits_lost = nothing
+    jacobian
 end
 
 """
@@ -147,7 +134,7 @@ function updated_jacobian!(Jac::Jacobian{ComplexF64}; update_infos::Bool=false) 
         if m == n
             # only apply row scaling for square matrices since
             # otherwise we change the problem
-            row_scaling!(Jac.qr.factors, Jac.D, 1e-6)
+            row_scaling!(Jac.qr.factors, Jac.D, 1)
         end
         # this computes a pivoted qr factorization, i.e.,
         # qr!(Jac.qr.factors, Val(true)) but without allocating new memory
@@ -185,7 +172,6 @@ Solve `Jac.J * x = b` inplace. Assumes `Jac` contains already the correct factor
 This stores the result in `x`.
 """
 function solve!(x, Jac::Jacobian, b::AbstractVector; update_digits_lost::Bool=false, refinement_step::Bool=false)
-    # @show Jac.active_factorization
     if Jac.active_factorization == LU_FACTORIZATION
         lu = Jac.lu
         if lu !== nothing
@@ -303,24 +289,6 @@ function residual!(u::AbstractVector, A, x, b, ::Type{T}=eltype(u)) where {T}
     end
     u
 end
-
-
-# """
-#     solve_with_digits_lost!(x, Jac::Jac, b)::Float64
-#
-# Solve `Jac.J * x = b` and apply one step of iterative refinment to get an estimate of the
-# (relative) lost digits.
-# Let ``δx`` be the update of the iterative refinement step.
-# Then, the estimate is computed by ``log₁₀(||δx||₂/ ϵ(||x||₂))`` where ``ϵ`` is the machine precision (`eps` in Julia).
-# This is a lower bound of the logarithm of the condition number, i.e., ``log₁₀(κ(J))``.
-# The estimate is returned.
-# """
-# function solve_with_digits_lost!(x::AbstractVector, Jac::Jacobian, b::AbstractVector)
-#     solve!(x, Jac, b)
-#     norm_x = euclidean_norm(x)
-#     norm_δx = iterative_refinement_step!(x, Jac, b)
-#     log₁₀(norm_δx / eps(norm_x))
-# end
 
 
 ###########################
@@ -568,7 +536,6 @@ function hnf!(A, U)
             if !iszero(A[j, j]) || !iszero(A[j, ii])
                 # 4.1
                 r, p, q = gcdx(A[j, j], A[j, ii])
-                # @show r, p, q, A[j, j], A[j, ii]
                 # 4.2
                 d_j = -A[j, ii] ÷ r
                 d_ii = A[j, j] ÷ r

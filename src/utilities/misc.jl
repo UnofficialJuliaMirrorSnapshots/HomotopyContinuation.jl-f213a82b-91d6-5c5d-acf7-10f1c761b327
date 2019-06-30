@@ -1,11 +1,5 @@
-export SymmetricGroup, infinity_norm, infinity_distance, fubini_study
-
-# The versions in DoubleFloats allocate :shrug:
-function to_ComplexDF64(z::ComplexF64)
-    x, y = reim(z)
-    Complex(Double64(x), Double64(y))
-end
-to_ComplexDF64!(u, Z::Vector{ComplexF64}) = map!(to_ComplexDF64, u, Z)
+export SymmetricGroup, infinity_norm, infinity_distance, fubini_study,
+    PrecisionOption, PRECISION_ADAPTIVE, PRECISION_FIXED_64, PRECISION_FIXED_128
 
 @enum ActiveCoeffs begin
     COEFFS_EVAL
@@ -13,6 +7,22 @@ to_ComplexDF64!(u, Z::Vector{ComplexF64}) = map!(to_ComplexDF64, u, Z)
     COEFFS_UNKNOWN
 end
 
+"""
+    PrecisionOption
+
+Controls the used precision for computing the residual in Newton's method.
+See [[Tisseur01]](https://epubs.siam.org/doi/abs/10.1137/S0895479899359837) for the analysis behind this approach.
+
+## Values
+* `PRECISION_FIXED_64`: Only use default 64 bit machine precision
+* `PRECISION_FIXED_128`: Always use emulated 128 bit floating point numbers. These are provided by the [DoubleFloats.jl](https://github.com/JuliaMath/DoubleFloats.jl) package.
+* `PRECISION_ADAPTIVE`: Adaptively switch between 64 and 128 bit floating point numbers.
+"""
+@enum PrecisionOption begin
+    PRECISION_FIXED_64
+    PRECISION_FIXED_128
+    PRECISION_ADAPTIVE
+end
 
 """
     unpack(a::Union{Nothing, T}, b::T)
@@ -198,7 +208,7 @@ function check_kwargs_empty(kwargs, allowed_kwargs=[])
             msg *= "\nAllowed keywords are\n"
             msg *= join(allowed_kwargs, ", ")
         end
-        throw(ErrorException(msg))
+        throw(ArgumentError(msg))
     end
 end
 
@@ -230,17 +240,6 @@ randseed(range=1_000:1_000_000) = rand(range)
 
 Compute the ∞-norm of `u-v`.
 """
-function infinity_distance(z₁::AbstractVector{<:Complex}, z₂::AbstractVector{<:Complex})
-    m = abs2(z₁[1] - z₂[1])
-    n₁, n₂ = length(z₁), length(z₂)
-    if n₁ ≠ n₂
-        return convert(typeof(m), Inf)
-    end
-    @inbounds for k=2:n₁
-        @fastmath m = max(m, abs2(z₁[k] - z₂[k]))
-    end
-    sqrt(m)
-end
 function infinity_distance(z₁::AbstractVector, z₂::AbstractVector)
     m = abs(z₁[1] - z₂[1])
     n₁, n₂ = length(z₁), length(z₂)
@@ -259,24 +258,8 @@ end
 
 Compute the ∞-norm of `z`. If `z` is a complex vector this is more efficient
 than `norm(z, Inf)`.
-
-    infinity_norm(z₁, z₂)
-
-Compute the ∞-norm of `z₁-z₂`.
 """
 infinity_norm(z::AbstractVector{<:Complex}) = sqrt(maximum(abs2, z))
-function infinity_norm(z₁::AbstractVector{<:Complex}, z₂::AbstractVector{<:Complex})
-    m = abs2(z₁[1] - z₂[1])
-    n₁, n₂ = length(z₁), length(z₂)
-    if n₁ ≠ n₂
-        return convert(typeof(m), Inf)
-    end
-    @inbounds for k=2:n₁
-        @fastmath m = max(m, abs2(z₁[k] - z₂[k]))
-    end
-    sqrt(m)
-end
-
 
 """
     fubini_study(x::PVector, y::PVector)
