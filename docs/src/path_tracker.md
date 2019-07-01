@@ -43,14 +43,16 @@ PathResult
 The following helper functions are provided
 ```@docs
 solution
+accuracy(::PathResult)
+multiplicity
 residual
 start_solution
-Base.isreal(::PathResult)
-LinearAlgebra.issuccess(::PathResult)
-isfailed
-isaffine
-isprojective
-isatinfinity
-issingular
-isnonsingular
+is_real(::PathResult)
+is_success(::PathResult)
+is_failed
+is_affine
+is_projective
+is_at_infinity
+is_singular
+is_nonsingular
 ```

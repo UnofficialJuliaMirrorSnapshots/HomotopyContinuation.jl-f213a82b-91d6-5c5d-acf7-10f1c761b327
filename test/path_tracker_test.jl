@@ -26,16 +26,32 @@
         p = [a, b]
 
         # parameter homotopy
+        tracker = pathtracker(F, parameters=p, p₁=[1, 0], p₀=[2, 4], projective_tracking=true)
+        @test tracker.problem isa Problem{ProjectiveTracking}
+
+        tracker = pathtracker(F, parameters=p, p₁=[1, 0], p₀=[2, 4], projective_tracking=false)
+        @test tracker.problem isa Problem{AffineTracking}
+
+        tracker = pathtracker(F, parameters=p, p₁=[1, 0], p₀=[2, 4], projective_tracking=true, affine_tracking=true)
+        @test tracker.problem isa Problem{AffineTracking}
+
+        tracker = pathtracker(F, parameters=p, p₁=[1, 0], p₀=[2, 4], projective_tracking=false, affine_tracking=false)
+        @test tracker.problem isa Problem{ProjectiveTracking}
+
+        tracker = pathtracker(F, parameters=p, p₁=[1, 0], p₀=[2, 4], affine_tracking=false)
+        @test tracker.problem isa Problem{ProjectiveTracking}
+
         tracker = pathtracker(F, parameters=p, p₁=[1, 0], p₀=[2, 4], affine_tracking=true)
         @test tracker.problem isa Problem{AffineTracking}
+
         @test affine_tracking(tracker.core_tracker) == true
         @test HC.type_of_x(tracker) == Vector{ComplexF64}
         res = track(tracker, [1, 1])
         @test res.return_code == :success
         @test isa(solution(res), Vector{ComplexF64})
         @test length(solution(res)) == 2
-        @test !isprojective(res)
-        @test isaffine(res)
+        @test !is_projective(res)
+        @test is_affine(res)
 
         x = @SVector [1.0, 1.0 + 0.0*im]
         tracker, starts = pathtracker_startsolutions(F, x;
@@ -55,8 +71,8 @@
         @test res.return_code == :success
         @test isa(solution(res), Vector{ComplexF64})
         @test length(solution(res)) == 2
-        @test !isprojective(res)
-        @test isaffine(res)
+        @test !is_projective(res)
+        @test is_affine(res)
 
         # total degree
         tracker, starts = pathtracker_startsolutions(equations(katsura(5)), affine_tracking=true)
@@ -64,8 +80,8 @@
         @test res.return_code == :success
         @test isa(solution(res), Vector{ComplexF64})
         @test length(solution(res)) == 6
-        @test !isprojective(res)
-        @test isaffine(res)
+        @test !is_projective(res)
+        @test is_affine(res)
     end
 
     @testset "Details Level" begin
@@ -85,7 +101,7 @@
         res = track(tracker, [1, 1]; details=:extensive)
         @test res.valuation !== nothing
 
-        @test isnonsingular(res)
+        @test is_nonsingular(res)
     end
 
     @testset "Parameter homotopy with AbstractSystem" begin
@@ -144,10 +160,10 @@
 
         q = randn(3)
         result = track(tracker, first(S_p₀); target_parameters=q)
-        @test issuccess(result)
+        @test is_success(result)
 
         result = track(tracker, first(S_p₀); start_parameters=p₀, target_parameters=q)
-        @test issuccess(result)
+        @test is_success(result)
 
         # Construct the PathTracker
         tracker = pathtracker(F; parameters=p, generic_parameters=p₀)
@@ -160,5 +176,15 @@
         @polyvar v w
         @test nfinite(solve([v - 2w , -v + 2w, v + w - 3])) == 1
         @test nfinite(solve([v - 2w , -v + 2w, v + w - 3], affine_tracking=false)) == 1
+    end
+
+    @testset "accuracy assigned" begin
+        @polyvar x y
+        f₁ = (x^4 + y^4 - 1) * (x^2 + y^2 - 2) + x^5 * y
+        f₂ = x^2+2x*y^2 - 2y^2 - 1/2
+        result = solve([f₁, f₂])
+        acc = results(result; only_real=true)[1].accuracy
+        @test acc !== nothing
+        @test !isnan(acc)
     end
 end

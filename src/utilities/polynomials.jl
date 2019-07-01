@@ -1,4 +1,4 @@
-export ishomogeneous, homogenize, uniquevar, Composition, expand, compose, validate,
+export is_homogeneous, homogenize, uniquevar, Composition, expand, compose, validate,
 		precondition, normalize_coefficients
 
 const MPPoly{T} = MP.AbstractPolynomialLike{T}
@@ -404,48 +404,48 @@ npolynomials(F::Composition) = length(F.polys[1])
 
 
 """
-    ishomogeneous(f::MP.AbstractPolynomialLike)
+    is_homogeneous(f::MP.AbstractPolynomialLike)
 
 Checks whether `f` is homogeneous.
 
-    ishomogeneous(f::MP.AbstractPolynomialLike, vars)
+    is_homogeneous(f::MP.AbstractPolynomialLike, vars)
 
 Checks whether `f` is homogeneous in the variables `vars` with possible weights.
 """
-ishomogeneous(f::MP.AbstractPolynomialLike) = MP.mindegree(f) == MP.maxdegree(f)
-function ishomogeneous(f::MP.AbstractPolynomialLike, variables)
+is_homogeneous(f::MP.AbstractPolynomialLike) = MP.mindegree(f) == MP.maxdegree(f)
+function is_homogeneous(f::MP.AbstractPolynomialLike, variables)
     d_min, d_max = minmaxdegree(f, variables)
     d_min == d_max
 end
 
 """
-    ishomogeneous(F::Vector{MP.AbstractPolynomialLike}, variables)
+    is_homogeneous(F::Vector{MP.AbstractPolynomialLike}, variables)
 
 Checks whether each polynomial in `F` is homogeneous in the variables `variables`.
 """
-function ishomogeneous(F::MPPolys, variables)
-    all(f -> ishomogeneous(f, variables), F)
+function is_homogeneous(F::MPPolys, variables)
+    all(f -> is_homogeneous(f, variables), F)
 end
-function ishomogeneous(F::MPPolys, ::Nothing=nothing; parameters=nothing)
+function is_homogeneous(F::MPPolys, ::Nothing=nothing; parameters=nothing)
     if parameters !== nothing
-        ishomogeneous(F, variables(F, parameters=parameters))
+        is_homogeneous(F, variables(F, parameters=parameters))
     else
-        all(ishomogeneous, F)
+        all(is_homogeneous, F)
     end
 end
-function ishomogeneous(F::MPPolys, hominfo::HomogenizationInformation; parameters=nothing)
+function is_homogeneous(F::MPPolys, hominfo::HomogenizationInformation; parameters=nothing)
 	if hominfo.vargroups !== nothing
-		all(vars -> ishomogeneous(F, vars), hominfo.vargroups)
+		all(vars -> is_homogeneous(F, vars), hominfo.vargroups)
 	elseif parameters !== nothing
-        ishomogeneous(F, variables(F, parameters=parameters))
+        is_homogeneous(F, variables(F, parameters=parameters))
     else
-        all(ishomogeneous, F)
+        all(is_homogeneous, F)
     end
 end
-function ishomogeneous(C::Composition, hominfo=nothing; kwargs...)
+function is_homogeneous(C::Composition, hominfo=nothing; kwargs...)
     homogeneous_degrees_helper(C; kwargs...) !== nothing
 end
-function ishomogeneous(C::Composition, hominfo::HomogenizationInformation; kwargs...)
+function is_homogeneous(C::Composition, hominfo::HomogenizationInformation; kwargs...)
 	if hominfo.vargroups && length(hominfo.vargroups) > 1
 		error("`variable_groups` and compositions are currently not supported.")
 	end
@@ -719,6 +719,19 @@ function remove_zeros!(C::Composition)
     C
 end
 
+"""
+    has_constant_polynomial(F::Vector{<:MP.AbstractPolynomialLike})
+
+Returns true if the system `F` contains a constant polynomial.
+"""
+function has_constant_polynomial(F::MPPolys)
+    for f in F
+		MP.nterms(f) == 1 && MP.isconstant(first(MP.terms(f))) && return true
+	end
+	false
+end
+has_constant_polynomial(C::Composition) = has_constant_polynomial(C.polys[1])
+
 permute(F::MPPolys, perm) = F[perm]
 permute(C::Composition, perm) = Composition([[C.polys[1][perm]]; C.polys[2:end]])
 
@@ -731,7 +744,7 @@ function check_zero_dimensional(F::Union{MPPolys, Composition})
     N = nvariables(F)
     n = npolynomials(F)
 
-    if n ≥ N || (n == N - 1 && ishomogeneous(F))
+    if n ≥ N || (n == N - 1 && is_homogeneous(F))
         return nothing
     end
     error("The input system will not result in a finite number of solutions.")
@@ -750,7 +763,7 @@ function homogenize_if_necessary(F::Union{MPPolys, Composition}, hominfo::Union{
 	# This fills in the simple variable group (allvars,)
 	hominfo = add_variable_groups(hominfo, F; parameters=parameters)
 
-    if ishomogeneous(F, hominfo; parameters=parameters)
+    if is_homogeneous(F, hominfo; parameters=parameters)
 		vargroups = VariableGroups(vars, hominfo)
 		F, vargroups, homvars(hominfo)
     elseif hominfo === nothing

@@ -1,11 +1,11 @@
-# Solving Polynomial Systems
+# Solving general polynomial systems
 
+The [`solve`](@ref) function is the most convenient way to solve general polynomial systems.
+For the mathematical background take a look at our [How does it work?](https://www.juliahomotopycontinuation.org/guides/how-does-it-work/) guide.
 
-## solve
 ```@docs
 solve
 ```
-
 
 ## Result
 
@@ -15,19 +15,27 @@ Result
 seed
 ```
 
-In order to analyse a `Result` we provide the following helper functions
+The nonsingular solutions are obtained as follows.
+```@docs
+nonsingular
+```
+
+The singular solutions are returned by using the following.
+```@docs
+singular
+```
+
+In order to analyse a `Result` we provide the following additional helper functions
 ```@docs
 results
 mapresults
 solutions
-realsolutions
-uniquesolutions
+real_solutions
 finite
 Base.real(::HomotopyContinuation.Results)
-atinfinity
-singular
-nonsingular
+at_infinity
 failed
+multiplicities!(::HomotopyContinuation.Result)
 multiplicities(::HomotopyContinuation.Results)
 ```
 
@@ -39,8 +47,15 @@ nfinite
 nreal
 nsingular
 nnonsingular
-natinfinity
+nat_infinity
 nfailed
 ```
 
 Also make sure to check the documentation for [`PathResult`](@ref).
+
+## Estimate the complexity
+We provide methods to compute the maximal number of solutions of polynomial systems.
+```@docs
+bezout_number
+mixed_volume
+```

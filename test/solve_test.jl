@@ -4,6 +4,11 @@
         @test_throws ArgumentError solve([x-2y+2, 0])
         @test_throws ArgumentError solve([x-2, y-2], [x-2, y-2,y+2], [[2, -3]])
         @test_throws ArgumentError solve([x-2z, y^2+3z, z^3+x^3], homvar=z)
+
+        # constant term
+        @test_throws ArgumentError solve([subs(x+2, x=>2), y^2+3x])
+        @polyvar u v
+        @test_throws ArgumentError solve([subs(x+2, x=>2), y^2+3x] ∘ [u, v])
         # overdetermined and abstract system
         @test_throws ArgumentError solve(FPSystem([x-2z, y^2+3z^2, z^3+x^3, z+x]))
         @test_throws ArgumentError solve(FPSystem([x-2z, y^2+3z^2, z^3+x^3, z+x]), homvar=4)
@@ -74,7 +79,7 @@
         F = equations(katsura(5))
         result = solve(homogenize(F), threading=false)
         @test result isa Result{<:ProjectiveVectors.PVector}
-        @test isprojective(first(result))
+        @test is_projective(first(result))
         @test nnonsingular(result) == 32
 
 
@@ -89,6 +94,12 @@
         @test result isa Result{<:Vector}
         @test nnonsingular(result) == 32
         @test nfinite(result) == 32
+
+        prob, startsolutions = problem_startsolutions(TargetSystemInput(F); projective_tracking=true)
+        proj_starts = HC.embed.(prob, startsolutions)
+        result = solve(prob.homotopy, proj_starts)
+        @test result isa Result{<:ProjectiveVectors.PVector}
+
 
         # Composition
         @polyvar a b c x y z u v
@@ -121,8 +132,12 @@
         z = 1
         F = [x^2 + 2*y^2 + 2*im*y*z, (18 + 3*im)*x*y + 7*im*y^2 - (3 - 18*im)*x*z - 14*y*z - 7*im*z^2]
         result = solve(F)
-        @test nsingular(result) == 3
-        @test all(r -> r.winding_number == 3, singular(result))
+        @test multiplicity(first(nonsingular(result))) == 1
+        @test multiplicity(first(singular(result))) == 3
+        @test nsingular(result) == 1
+        @test nsingular(result; counting_multiplicities=true) == 3
+        @test length(singular(result)) == 1
+        @test all(r -> multiplicity(r) == 3, singular(result; multiple_results = true))
     end
 
     @testset "Path jumping" begin
@@ -233,7 +248,7 @@
         target = [randn(ComplexF64, 3), randn(ComplexF64, 2)]
         H = CoefficientHomotopy(E, start, target)
         result = solve(H, [[1, 1]])
-        @test issuccess(result[1])
+        @test is_success(result[1])
     end
 
     @testset "Overdetermined" begin
@@ -265,7 +280,13 @@
         tracker, starts = pathtracker_startsolutions(
                 [[p₁, p₂, p₃]; L₁], [[p₁, p₂, p₃]; L₂], s;
                 affine_tracking=false)
-        @test issuccess(track(tracker, s))
+        @test is_success(track(tracker, s))
+
+        s = first(solutions(solve([x^2+y^2+z^2 - 1; L₁])))
+        tracker, starts = pathtracker_startsolutions(
+                [[p₁, p₂, p₃]; L₁], [[p₁, p₂, p₃]; L₂], s;
+                projective_tracking=true)
+        @test is_success(track(tracker, s))
     end
 
     @testset "MultiHomogeneous" begin
@@ -312,21 +333,36 @@
     end
 
     @testset "Singular1" begin
-        @polyvar x y z
+        @polyvar x z y
         # This has two roots of multiplicity 6 at the hyperplane z=0
         F = [0.75x^4 + 1.5x^2*y^2-2.5x^2*z^2+0.75*y^4 - 2.5y^2*z^2 + 0.75z^4; 10x^2*z + 10*y^2*z-6z^3]
         res = solve(F; threading=false)
-        @test nsingular(res) == 12
-        @test length.(multiplicities(solutions(res))) == [6,6]
+        @test nsingular(res) == 2
+        @test nsingular(res; counting_multiplicities=true) == 12
+        @test multiplicity.(results(res)) == [6,6]
 
         F_affine = subs.(F, Ref(y => 1))
         res_affine = solve(F_affine; threading=false)
-        @test nsingular(res_affine) == 12
-        @test length.(multiplicities(solutions(res_affine))) == [6,6]
+        @test nsingular(res_affine) == 2
+        @test nsingular(res_affine; counting_multiplicities=true) == 12
+        @test multiplicity.(results(res_affine)) == [6,6]
+        @test_nowarn sprint(show, res_affine)
+
+        res_affine = solve(F_affine; threading=true)
+        @test nsingular(res_affine) == 2
+        @test nsingular(res_affine; counting_multiplicities=true) == 12
+        @test multiplicity.(results(res_affine)) == [6,6]
         @test_nowarn sprint(show, res_affine)
 
         res_affine2 = solve(F_affine; affine_tracking=false, threading=false)
-        @test nsingular(res_affine2) == 12
-        @test length.(multiplicities(solutions(res_affine2))) == [6,6]
+        @test nsingular(res_affine2) == 2
+        @test nsingular(res_affine2; counting_multiplicities=true) == 12
+        @test multiplicity.(results(res_affine2)) == [6,6]
+        @test_nowarn sprint(show, res_affine2)
+
+        # change multiplicity tolerance to only have one
+        multiplicities!(res_affine2; tol=10)
+        @test nsingular(res_affine2) == 1
+        @test multiplicity.(results(res_affine2)) == [12]
     end
 end

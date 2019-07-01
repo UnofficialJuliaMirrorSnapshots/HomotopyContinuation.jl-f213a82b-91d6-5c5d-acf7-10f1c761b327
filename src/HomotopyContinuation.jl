@@ -8,26 +8,30 @@ module HomotopyContinuation
     import MultivariatePolynomials
     import PrettyTables
     import Printf
-    import ProgressMeter
     import ProjectiveVectors
     import Random
     import StaticArrays
     import StaticPolynomials
     import TreeViews
 
-    import LinearAlgebra: issuccess, cond
+    import LinearAlgebra: cond
     import Parameters: @pack!, @unpack
-    import DynamicPolynomials: @polyvar
+    import DynamicPolynomials: @polyvar, subs, differentiate
     import ProjectiveVectors: PVector
     import StaticArrays: SVector, @SVector
     import Test: @test
+    import MixedSubdivisions: mixed_volume
 
     const FP = FixedPolynomials
     const MP = MultivariatePolynomials
     const SP = StaticPolynomials
 
-    export @polyvar
-    export issuccess, cond
+    export @polyvar, subs, differentiate
+    export mixed_volume
+    export cond
+
+    include("progress_meter.jl")
+    import .ProgressMeter
 
     include("utilities.jl")
     include("affine_patches.jl")
@@ -46,6 +50,4 @@ module HomotopyContinuation
     include("polyhedral.jl")
     include("solve.jl")
     include("monodromy.jl")
-
-
 end

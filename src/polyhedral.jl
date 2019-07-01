@@ -1,5 +1,6 @@
-export PolyhedralTracker, update_cell!
-import MixedSubdivisions: MixedCell, MixedCellIterator, RegenerationTraverser
+export PolyhedralStartSolutionsIterator, update_cell!, mixed_volume
+
+import MixedSubdivisions: MixedCell, MixedCellIterator, RegenerationTraverser, mixed_volume
 import ElasticArrays: ElasticArray
 
 
@@ -8,10 +9,10 @@ import ElasticArrays: ElasticArray
 #####################
 
 """
-    PolyhedralStartSolutionsIterator(support, lifting, start_coefficients)
+    PolyhedralStartSolutionsIterator(f)
 
-Creates an iterator over all mixed cells and their solutions induced by the given `lifting` of the
-`support` with the given `start_coefficients`.
+Creates an iterator over all mixed cells and their solutions corresponding to the polynomial
+system `f`.
 The iterator returns a tuple `(cell, X)` where `cell` is a `MixedCell` and
 `X` is a `n × D` matrix containing the in each column a solution of the binomial
 system corresponding to the mixed cell.
@@ -103,7 +104,11 @@ end
 
 function compute_mixed_cells!(iter::PolyhedralStartSolutionsIterator)
     if isnothing(iter.mixed_cells) || isnothing(iter.lifting)
-        mixed_cells, lifting = MixedSubdivisions.fine_mixed_cells(iter.support)
+        res = MixedSubdivisions.fine_mixed_cells(iter.support)
+        if isnothing(res)
+            throw(OverflowError("Cannot compute a start system due to an overflow in the mixed subdivision algorithm."))
+        end
+        mixed_cells, lifting = res
         iter.mixed_cells = mixed_cells
         iter.lifting = lifting
     end
@@ -309,7 +314,7 @@ function cell_solutions_homotopy!(iter::PolyhedralStartSolutionsIterator, cell::
         end
 
         ret = track!(binomial_tracker, x, 1.0, 0.0)
-        x̄ = currx(binomial_tracker)
+        x̄ = current_x(binomial_tracker)
         for j in 1:n
             X[j,i] = x̄[j]
         end
@@ -361,7 +366,7 @@ function track!(PT::PolyhedralTracker, x∞)
     if retcode != CoreTrackerStatus.success
         return PathTrackerStatus.status(retcode)
     end
-    track!(PT.generic_tracker, currx(PT.toric_tracker))
+    track!(PT.generic_tracker, current_x(PT.toric_tracker))
 end
 
 @inline function PathResult(PT::PolyhedralTracker, args...; kwargs...)
@@ -397,7 +402,8 @@ function track_paths(PT::PolyhedralTracker, start_solutions::PolyhedralStartSolu
 
     n = length(start_solutions)
     if show_progress
-        progress = ProgressMeter.Progress(n, 0.1, "Tracking $n paths... ")
+        progress = ProgressMeter.Progress(n; dt=0.1, desc="Tracking $n paths... ",
+                                    delay=0.3, clear_output_ijulia=true)
     else
         progress = nothing
     end
