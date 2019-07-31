@@ -8,7 +8,7 @@ const monodromy_options_supported_keywords = [:distance, :identical_tol, :done_c
     :group_action,:group_actions, :group_action_on_all_nodes,
     :parameter_sampler, :equivalence_classes, :complex_conjugation, :check_startsolutions,
     :target_solutions_count, :timeout,
-    :min_solutions, :max_loops_no_progress]
+    :min_solutions, :max_loops_no_progress, :reuse_loops]
 
 struct MonodromyOptions{F<:Function, F1<:Function, F2<:Tuple, F3<:Function}
     distance_function::F
@@ -25,11 +25,13 @@ struct MonodromyOptions{F<:Function, F1<:Function, F2<:Tuple, F3<:Function}
     timeout::Float64
     min_solutions::Int
     max_loops_no_progress::Int
+    reuse_loops::Symbol
 end
 
-function MonodromyOptions(is_real_system;
+function MonodromyOptions(is_real_system::Bool,
+    refinement_accuracy::Float64;
     distance=euclidean_distance,
-    identical_tol::Float64=1e-6,
+    identical_tol::Float64=sqrt(refinement_accuracy),
     done_callback=always_false,
     group_action=nothing,
     group_actions=group_action === nothing ? nothing : GroupActions(group_action),
@@ -42,7 +44,8 @@ function MonodromyOptions(is_real_system;
     target_solutions_count=nothing,
     timeout=float(typemax(Int)),
     min_solutions::Int=default_min_solutions(target_solutions_count),
-    max_loops_no_progress::Int=10)
+    max_loops_no_progress::Int=10,
+    reuse_loops::Symbol=:all)
 
     if group_actions isa GroupActions
        actions = group_actions
@@ -59,7 +62,8 @@ function MonodromyOptions(is_real_system;
         target_solutions_count === nothing ? typemax(Int) : target_solutions_count,
         float(timeout),
         min_solutions,
-        max_loops_no_progress)
+        max_loops_no_progress,
+        reuse_loops)
 end
 
 default_min_solutions(::Nothing) = 1
@@ -108,7 +112,7 @@ Base.show(io::IO, ::MIME"application/prs.juno.inline", S::MonodromyStatistics) =
 
 # update routines
 function trackedpath!(stats::MonodromyStatistics, retcode)
-    if retcode == CoreTrackerStatus.success
+    if retcode == PathTrackerStatus.success
         stats.ntrackedpaths += 1
     else
         stats.ntrackingfailures += 1
@@ -128,7 +132,7 @@ function n_completed_loops_without_change(stats, nsolutions)
     k = 0
     for i in length(stats.nsolutions_development):-1:1
         if stats.nsolutions_development[i] != nsolutions
-            return k
+            return max(k - 1, 0)
         end
         k += 1
     end
@@ -145,145 +149,40 @@ end
 
 export Triangle, Petal
 
-#####################
-# Nodes of the Loop
-#####################
+#######################
+# Loop data structure
+#######################
 
-"""
-    Node(p, x::UniquePoints; store_points=true, is_main_node=false)
-
-Create a node with a parameter from the same type as `p` and
-points from `x`. If `stores_points` is `true` a `UniquePoints`
-data structure is allocated to keep track of all known solutions of this node.
-"""
-struct Node{T, UP<:UniquePoints}
-    p::Vector{T}
-    points::Union{Nothing, UP}
-    # Metadata / configuration
-    main_node::Bool
+struct LoopEdge
+    p₁::Vector{ComplexF64}
+    p₀::Vector{ComplexF64}
+    weights::Union{Nothing, NTuple{2, ComplexF64}}
 end
 
-function Node(p::AbstractVector{T}, x::UP; store_points=true, is_main_node=false) where {T, UP<:UniquePoints}
-    if store_points == false
-        Node{T, typeof(x)}(Vector(p), nothing, is_main_node)
-    else
-        Node(Vector(p), x, is_main_node)
-    end
-end
-function Node(p::AbstractVector{T}, node::Node{T,UP}, options::MonodromyOptions; store_points=true, is_main_node=false) where {T, UP}
-    if store_points == false
-        Node{T, UP}(Vector(p), nothing, is_main_node)
-    else
-        Node{T, UP}(Vector(p), similar(UP), is_main_node)
-    end
-end
-
-
-"""
-    add!(node::Node, x; kwargs...)
-
-Calls [`add!`](@ref) on the points of the Node with option `Val(true)`.
-"""
-function add!(node::Node, x; kwargs...)
-    if node.points === nothing
-        nothing
-    else
-        add!(node.points, x, Val(true); kwargs...)
-    end
-end
-
-
-#####################
-# Edges of the Loop
-#####################
-"""
-    Edge(start::Int, target::Int; usegamma=false)
-
-Create an edge between two nodes references by the index. `usegamma` refers
-to an optional weight of two random complex numbers γ=(γ₁, γ₀). These are the same
-gammas as in [`ParameterHomotopy`](@ref).
-
-    Edge(edge::Edge)
-
-Construct an indentical `Edge` as `edge`, but with newly samples γ (if applicable).
-"""
-struct Edge
-    start::Int
-    target::Int
-    γ::Union{Nothing, NTuple{2, ComplexF64}}
-end
-function Edge(start::Int, target::Int; usegamma=false)
-    if usegamma
+function LoopEdge(p₁, p₀; weights=false)
+    if weights
         γ = (randn(ComplexF64), randn(ComplexF64))
     else
         γ = nothing
     end
-    Edge(start, target, γ)
-end
-function Edge(edge::Edge)
-    if edge.γ === nothing
-        edge
-    else
-        γ = (randn(ComplexF64), randn(ComplexF64))
-        Edge(edge.start, edge.target, γ)
-    end
+    LoopEdge(convert(Vector{ComplexF64}, p₁), convert(Vector{ComplexF64}, p₀), γ)
 end
 
-#######################
-# Loop data structure
-#######################
-"""
-    Loop(p, x::UniquePoints, nnodes::Int, options::MonodromyOptions; usegamma=true)
-
-Construct a loop using `nnodes` nodes with parameters of the type of `p` and solutions `x`. `usegamma` refers to the use weights on the edges. See also
-[`Edge`](@ref).
-
-    Loop(style::LoopStyle, p, x::UniquePoints, options::MonodromyOptions)
-
-Construct a loop using the defined style `style` with parameters of the type of `p` and solutions `x`.
-"""
-struct Loop{N<:Node}
-    nodes::Vector{N}
-    edges::Vector{Edge}
+struct MonodromyLoop
+    edges::Vector{LoopEdge}
 end
 
-function Loop(p₁, x₁::UP, nnodes::Int, options::MonodromyOptions; usegamma=true) where {UP<:UniquePoints}
-    n₁ = Node(p₁, x₁, is_main_node = true)
-    nodes = [n₁]
-    store_points = options.group_action_on_all_nodes && has_group_actions(options)
+function MonodromyLoop(base_p, nnodes::Int, options::MonodromyOptions; weights=true)
+    edges = LoopEdge[]
+    p₁ = base_p
     for i = 2:nnodes
-        p = options.parameter_sampler(p₁)
-        push!(nodes, Node(p, n₁, options; store_points=store_points, is_main_node=false))
+        p₀ = options.parameter_sampler(p₁)
+        push!(edges, LoopEdge(p₁, p₀; weights=weights))
+        p₁ = p₀
     end
-
-    loop = map(i -> Edge(i - 1, i; usegamma=usegamma), 2:nnodes)
-    push!(loop, Edge(nnodes, 1; usegamma=usegamma))
-
-    Loop(nodes, loop)
+    push!(edges, LoopEdge(p₁, base_p; weights=weights))
+    MonodromyLoop(edges)
 end
-
-"""
-    solutions(loop::Loop)
-
-Get the solutions of the loop.
-"""
-solutions(loop::Loop) = loop.nodes[1].points
-
-"""
-    nsolutions(loop::Loop)
-
-Get the number solutions of the loop.
-"""
-nsolutions(loop::Loop) = length(solutions(loop))
-
-"""
-    mainnode(loop::Loop)
-
-Get the main [`Node`](@ref) of the loop, i.e., the one with the original provided parameter.
-"""
-mainnode(loop::Loop) = loop.nodes[1]
-
-nextedge(loop::Loop, edge::Edge) = loop.edges[edge.target]
 
 ##############
 # Loop styles
@@ -308,8 +207,8 @@ struct Triangle <: LoopStyle
 end
 Triangle(;useweights=true) = Triangle(useweights)
 
-function Loop(strategy::Triangle, p, x::UP, options::MonodromyOptions) where {UP<:UniquePoints}
-    Loop(p, x, 3, options, usegamma=strategy.useweights)
+function MonodromyLoop(strategy::Triangle, p, options::MonodromyOptions)
+    MonodromyLoop(p, 3, options, weights=strategy.useweights)
 end
 
 """
@@ -319,17 +218,17 @@ A petal is a loop consisting of the main node and one other node connected
 by two edges with different random weights.
 """
 struct Petal <: LoopStyle end
-function Loop(strategy::Petal, p, x::UP, options::MonodromyOptions) where {UP<:UniquePoints}
-    Loop(p, x, 2, options, usegamma=true)
+function MonodromyLoop(strategy::Petal, p, options::MonodromyOptions)
+    MonodromyLoop(p, 2, options, weights=true)
 end
 
 
 """
-    regenerate!(loop::Loop, options::MonodromyOptions, stats::MonodromyStatistics)
+    regenerate!(loop::MonodromyLoop, options::MonodromyOptions, stats::MonodromyStatistics)
 
 Regenerate all random parameters in the loop in order to introduce a new monodromy action.
 """
-function regenerate!(loop::Loop, options::MonodromyOptions, stats::MonodromyStatistics)
+function regenerate!(loop::MonodromyLoop, options::MonodromyOptions, stats::MonodromyStatistics)
     main = mainnode(loop)
 
     # The first node is the main node and doesn't get touched
@@ -344,33 +243,23 @@ end
 
 
 """
-    track(tracker, x::AbstractVector, edge::Edge, loop::Loop, stats::MonodromyStatistics)
+    track(tracker, x::AbstractVector, edge::LoopEdge, loop::MonodromyLoop, stats::MonodromyStatistics)
 
 Track `x` along the edge `edge` in the loop `loop` using `tracker`. Record statistics
 in `stats`.
 """
-function track(tracker::CoreTracker, x::AbstractVector, edge::Edge, loop::Loop, stats::MonodromyStatistics)
-    set_parameters!(tracker, edge, loop)
-    track(tracker, x, stats)
-end
-function track(tracker::CoreTracker, x::AbstractVector, stats::MonodromyStatistics)
-    retcode = track!(tracker, x, 1.0, 0.0)
-    trackedpath!(stats, retcode)
-    retcode
-end
-
-"""
-    set_parameters!(tracker::CoreTracker, e::Edge, loop::Loop)
-
-Setup the parameters in the ParameterHomotopy in `tracker` to fit the edge `e`.
-"""
-function set_parameters!(tracker::CoreTracker, e::Edge, loop::Loop)
-    H = basehomotopy(tracker.homotopy)
-    if !(H isa ParameterHomotopy)
-        error("Base homotopy is not a ParameterHomotopy")
+function track(tracker::PathTracker, x::AbstractVector, loop::MonodromyLoop, stats::MonodromyStatistics)
+    H = basehomotopy(tracker.core_tracker.homotopy)
+    local retcode::PathTrackerStatus.states
+    y = x
+    for e in loop.edges
+        set_parameters!(H, (e.p₁, e.p₀), e.weights)
+        retcode = _track!(tracker, y)
+        trackedpath!(stats, retcode)
+        retcode == PathTrackerStatus.success || break
+        y = solution(tracker)
     end
-    p = (loop.nodes[e.start].p, loop.nodes[e.target].p)
-    set_parameters!(H, p, e.γ)
+    retcode
 end
 
 
@@ -388,6 +277,7 @@ struct MonodromyResult{N, T1, T2}
     parameters::Vector{T2}
     statistics::MonodromyStatistics
     equivalence_classes::Bool
+    seed::Int
 end
 
 Base.iterate(R::MonodromyResult) = iterate(R.solutions)
@@ -404,11 +294,12 @@ function Base.show(io::IO, result::MonodromyResult{N, T}) where {N, T}
     end
     println(io, "• return code → $(result.returncode)")
     println(io, "• $(result.statistics.ntrackedpaths) tracked paths")
+    println(io, "• seed → $(result.seed)")
 end
 
 
 TreeViews.hastreeview(::MonodromyResult) = true
-TreeViews.numberofnodes(::MonodromyResult) = 5
+TreeViews.numberofnodes(::MonodromyResult) = 6
 TreeViews.treelabel(io::IO, x::MonodromyResult, ::MIME"application/prs.juno.inline") =
     print(io, "<span class=\"syntax--support syntax--type syntax--julia\">MonodromyResult</span>")
 
@@ -431,6 +322,8 @@ function TreeViews.nodelabel(io::IO, x::MonodromyResult, i::Int, ::MIME"applicat
         print(io, "Tracked paths")
     elseif i == 5
         print(io, "Parameters")
+    elseif i == 6
+        print(io, "Seed")
     end
 end
 function TreeViews.treenode(r::MonodromyResult, i::Integer)
@@ -444,6 +337,8 @@ function TreeViews.treenode(r::MonodromyResult, i::Integer)
         return r.statistics.ntrackedpaths
     elseif i == 5
         return r.parameters
+    elseif i == 6
+        return r.seed
     end
     missing
 end
@@ -515,17 +410,89 @@ parameters(r::MonodromyResult) = r.parameters
 #####################
 ## monodromy solve ##
 #####################
-"""
-MonodromyCache{FT<:FixedHomotopy, Tracker<:CoreTracker, NC<:AbstractNewtonCache}
-
-Cache for monodromy loops.
-"""
-struct MonodromyCache{FT<:FixedHomotopy, Tracker<:CoreTracker, NC<:AbstractNewtonCache, AV<:AbstractVector}
-    F::FT
+struct MonodromySolver{T<:Number, UP<:UniquePoints, MO<:MonodromyOptions, Tracker<:PathTracker}
+    parameters::Vector{T}
+    solutions::UP
+    loops::Vector{MonodromyLoop}
+    options::MO
+    statistics::MonodromyStatistics
     tracker::Tracker
-    newton_cache::NC
-    out::AV
 end
+
+function MonodromySolver(F::Inputs, solution::Vector{<:Number}, p₀::AbstractVector{TP}; kwargs...) where {TP}
+    MonodromySolver(F, [solution], p₀; kwargs...)
+end
+function MonodromySolver(F::Inputs, solutions::Vector{<:AbstractVector{<:Number}}, p₀::AbstractVector{TP}; kwargs...) where {TP}
+    MonodromySolver(F, static_solutions(solutions), p₀; kwargs...)
+end
+function MonodromySolver(F::Inputs,
+        startsolutions::Vector{<:SVector{NVars, <:Complex}},
+        p::AbstractVector{TP};
+        parameters=nothing,
+        strategy=nothing,
+        show_progress=true,
+        showprogress=nothing, #deprecated
+        refinement_accuracy=1e-10, # set a higher refinement_accuracy than the default
+        kwargs...) where {TP, NVars}
+
+    @deprecatekwarg showprogress show_progress
+
+    if parameters !== nothing && length(p) ≠ length(parameters)
+        throw(ArgumentError("Number of provided parameters doesn't match the length of initially provided parameter `p₀`."))
+    end
+
+    x₀ = Vector(first(startsolutions))
+    p₀ = Vector{promote_type(Float64, TP)}(p)
+
+    optionskwargs, restkwargs = splitkwargs(kwargs, monodromy_options_supported_keywords)
+
+    # construct tracker
+    tracker = pathtracker(F, startsolutions; refinement_accuracy=refinement_accuracy,
+                        parameters=parameters, generic_parameters=p₀, restkwargs...)
+    # Check whether homotopy is real
+    is_real_system = numerically_check_real(tracker.core_tracker.homotopy, x₀)
+    options = MonodromyOptions(is_real_system, refinement_accuracy;
+                    optionskwargs...)
+    # construct UniquePoints
+    if options.equivalence_classes
+        uniquepoints = UniquePoints(eltype(startsolutions), options.distance_function;
+                                    group_actions = options.group_actions,
+                                    check_real = true)
+    else
+        uniquepoints = UniquePoints(eltype(startsolutions), options.distance_function; check_real = true)
+    end
+    # add only unique points that are true solutions
+    for s in startsolutions
+        if !options.check_startsolutions || is_valid_start_value(tracker, s)
+            add!(uniquepoints, s; tol=options.identical_tol)
+        end
+    end
+
+    statistics = MonodromyStatistics(uniquepoints)
+
+    if strategy === nothing
+        strategy = default_strategy(F, parameters, p; is_real_system=is_real_system)
+    end
+
+    # construct Loop
+    loops = [MonodromyLoop(strategy, p₀, options)]
+
+    MonodromySolver(p₀, uniquepoints, loops, options, statistics, tracker)
+end
+
+"""
+    solutions(MS::MonodromySolver)
+
+Get the solutions of the loop.
+"""
+solutions(MS::MonodromySolver) = MS.solutions.points
+
+"""
+    nsolutions(loop::MonodromyLoop)
+
+Get the number solutions of the loop.
+"""
+nsolutions(MS::MonodromySolver) = length(solutions(MS))
 
 
 """
@@ -550,112 +517,11 @@ by monodromy techniques. This makes loops in the parameter space of `F` to find 
 * `check_startsolutions=true`: If `true`, we do a Newton step for each entry of `sols`for checking if it is a valid startsolutions. Solutions which are not valid are sorted out.
 * `timeout=float(typemax(Int))`: The maximal number of *seconds* the computation is allowed to run.
 * `min_solutions`: The minimal number of solutions before a stopping heuristic is applied. By default this is half of `target_solutions_count` if applicable otherwise 2.
+* `resuse_loops::Symbol=:all`: Strategy to reuse other loops for new found solutions. `:all` propagates a new solution through all other loops, `:random` picks a random loop, `:none` doesn't reuse a loop.
 """
-function monodromy_solve(F::Inputs, solution::Vector{<:Number}, p₀::AbstractVector{TP}; kwargs...) where {TP}
-    monodromy_solve(F, [solution], p₀; kwargs...)
-end
-function monodromy_solve(F::Inputs, solutions::Vector{<:AbstractVector{<:Number}}, p₀::AbstractVector{TP}; kwargs...) where {TP}
-    monodromy_solve(F, static_solutions(solutions), p₀; kwargs...)
-end
-function monodromy_solve(F::Inputs,
-        startsolutions::Vector{<:SVector{NVars, <:Complex}},
-        p::AbstractVector{TP};
-        parameters=nothing,
-        strategy=nothing,
-        show_progress=true,
-        showprogress=nothing, #deprecated
-        kwargs...) where {TP, NVars}
-
-    @deprecatekwarg showprogress show_progress
-
-    if parameters !== nothing && length(p) ≠ length(parameters)
-        throw(ArgumentError("Number of provided parameters doesn't match the length of initially provided parameter `p₀`."))
-    end
-
-    p₀ = Vector{promote_type(Float64, TP)}(p)
-
-    optionskwargs, restkwargs = splitkwargs(kwargs, monodromy_options_supported_keywords)
-
-    # construct tracker
-    tracker = coretracker(F, startsolutions; parameters=parameters, generic_parameters=p₀, restkwargs...)
-    if affine_tracking(tracker)
-        HC = HomotopyWithCache(tracker.homotopy, tracker.state.x, 1.0)
-        F₀ = FixedHomotopy(HC, 0.0)
-    else
-        # Force affine newton method
-        patch_state = state(EmbeddingPatch(), tracker.state.x)
-        HC = HomotopyWithCache(PatchedHomotopy(tracker.homotopy, patch_state), tracker.state.x, 1.0)
-        F₀ = FixedHomotopy(HC, 0.0)
-    end
-
-    # Check whether homotopy is real
-    is_real_system = numerically_check_real(tracker.homotopy, tracker.state.x)
-
-    options = MonodromyOptions(is_real_system; optionskwargs...)
-    # construct cache
-    newt_cache = newton_cache(F₀, tracker.state.x)
-    C =  MonodromyCache(F₀, tracker, newt_cache, copy(tracker.state.x))
-    # construct UniquePoints
-    if options.equivalence_classes
-        uniquepoints = UniquePoints(eltype(startsolutions), options.distance_function;
-                                    group_actions = options.group_actions,
-                                    check_real = true)
-    else
-        uniquepoints = UniquePoints(eltype(startsolutions), options.distance_function; check_real = true)
-    end
-    # add only unique points that are true solutions
-    if options.check_startsolutions
-        for s in startsolutions
-            y = verified_affine_vector(C, s, s, options)
-            if y !== nothing
-                add!(uniquepoints, y; tol=options.identical_tol)
-            end
-        end
-    else
-        add!(uniquepoints, startsolutions; tol=options.identical_tol)
-    end
-    statistics = MonodromyStatistics(uniquepoints)
-    if  length(points(uniquepoints)) == 0
-        @warn "None of the provided solutions is a valid start solution."
-        return MonodromyResult(:invalid_startvalue,
-                Vector{SVector{length(startsolutions[1]),ComplexF64}}(), p₀, statistics,
-                options.equivalence_classes)
-    end
-
-    if strategy === nothing
-        strategy = default_strategy(F, parameters, p; is_real_system=is_real_system)
-    end
-
-    # construct Loop
-    loop = Loop(strategy, p₀, uniquepoints, options)
-
-    # solve
-    retcode = :not_assigned
-    if show_progress
-        if !options.equivalence_classes
-            desc = "Solutions found:"
-        else
-            desc = "Classes of solutions (modulo group action) found:"
-        end
-        progress = ProgressMeter.ProgressUnknown(desc; delay=0.5, clear_output_ijulia=true)
-    else
-        progress = nothing
-    end
-
-    n_blas_threads = single_thread_blas()
-    try
-        retcode = monodromy_solve!(loop, C, options, statistics, progress)
-    catch e
-        if (e isa InterruptException)
-            retcode = :interrupt
-        else
-            rethrow(e)
-        end
-    end
-    n_blas_threads > 1 && set_num_BLAS_threads(n_blas_threads)
-
-    finished!(statistics, nsolutions(loop))
-    MonodromyResult(retcode, points(solutions(loop)), p₀, statistics, options.equivalence_classes)
+function monodromy_solve(args...; seed=randseed(), show_progress=true, kwargs...)
+    Random.seed!(seed)
+    monodromy_solve!(MonodromySolver(args...; kwargs...), seed; show_progress=show_progress)
 end
 
 function default_strategy(F::MPPolyInputs, parameters, p₀::AbstractVector{TP}; is_real_system=false) where {TC,TP}
@@ -705,29 +571,64 @@ end
 #################
 
 """
-    Job{N, T}
+    MonodromyJob
 
-A `Job` is consisting of an `Edge` and a solution to the start node of this edge.
+A `MonodromyJob` is consisting of a solution id and a loop id.
 """
-struct Job{N, T}
-    x::SVector{N, T}
-    edge::Edge
+struct MonodromyJob
+    id::Int
+    loop_id::Int
 end
 
-function monodromy_solve!(loop::Loop, C::MonodromyCache, options::MonodromyOptions,
-    stats::MonodromyStatistics, progress)
+function monodromy_solve!(MS::MonodromySolver, seed; show_progress=true)
+    if nsolutions(MS) == 0
+        @warn "None of the provided solutions is a valid start solution."
+        return MonodromyResult(:invalid_startvalue,
+                similar(MS.solutions.points, 0), MS.parameters, MS.statistics,
+                MS.options.equivalence_classes, seed)
+    end
+    # solve
+    retcode = :not_assigned
+    if show_progress
+        if !MS.options.equivalence_classes
+            desc = "Solutions found:"
+        else
+            desc = "Classes of solutions (modulo group action) found:"
+        end
+        progress = ProgressMeter.ProgressUnknown(desc; delay=0.5, clear_output_ijulia=true)
+    else
+        progress = nothing
+    end
 
+    n_blas_threads = single_thread_blas()
+    try
+        retcode = monodromy_solve!(MS, seed, progress)
+    catch e
+        if (e isa InterruptException)
+            retcode = :interrupt
+        else
+            rethrow(e)
+        end
+    end
+    n_blas_threads > 1 && set_num_BLAS_threads(n_blas_threads)
+    finished!(MS.statistics, nsolutions(MS))
+    MonodromyResult(retcode, solutions(MS), MS.parameters, MS.statistics,
+        MS.options.equivalence_classes, seed)
+end
+
+
+function monodromy_solve!(MS::MonodromySolver, seed, progress::Union{Nothing,ProgressMeter.ProgressUnknown})
     t₀ = time_ns()
     iterations_without_progress = 0 # stopping heuristic
     # intialize job queue
-    queue = map(x -> Job(x, loop.edges[1]), solutions(loop))
+    queue = MonodromyJob.(1:nsolutions(MS), 1)
 
-    n = nsolutions(loop)
-    while n < options.target_solutions_count
-        retcode = empty_queue!(queue, loop, C, options, t₀, stats, progress)
+    n = nsolutions(MS)
+    while n < MS.options.target_solutions_count
+        retcode = empty_queue!(queue, MS, t₀, progress)
 
         if retcode == :done
-            update_progress!(progress, loop, stats; finish=true)
+            update_progress!(progress, nsolutions(MS), MS.statistics; finish=true)
             break
         elseif retcode == :timeout
             return :timeout
@@ -736,128 +637,106 @@ function monodromy_solve!(loop::Loop, C::MonodromyCache, options::MonodromyOptio
         end
 
         # Iterations heuristic
-        n_new = nsolutions(loop)
+        n_new = nsolutions(MS)
         if n == n_new
             iterations_without_progress += 1
         else
             iterations_without_progress = 0
             n = n_new
         end
-        if iterations_without_progress == options.max_loops_no_progress &&
-            n_new ≥ options.min_solutions
+        if iterations_without_progress == MS.options.max_loops_no_progress &&
+            n_new ≥ MS.options.min_solutions
             return :heuristic_stop
         end
 
-        regenerate_loop_and_schedule_jobs!(queue, loop, options, stats)
+        regenerate_loop_and_schedule_jobs!(queue, MS)
     end
 
     :success
 end
 
-function empty_queue!(queue, loop::Loop, C::MonodromyCache, options::MonodromyOptions,
-        t₀::UInt, stats::MonodromyStatistics, progress)
+function empty_queue!(queue, MS::MonodromySolver, t₀::UInt, progress)
     while !isempty(queue)
         job = pop!(queue)
-        status = process!(queue, job, C, loop, options, stats, progress)
+        status = process!(queue, job, MS, progress)
         if status == :done
             return :done
         elseif status == :invalid_startvalue
             return :invalid_startvalue
         end
-        update_progress!(progress, loop, stats)
+        update_progress!(progress, nsolutions(MS), MS.statistics)
         # check timeout
-        if (time_ns() - t₀) > options.timeout * 1e9 # convert s to ns
+        if (time_ns() - t₀) > MS.options.timeout * 1e9 # convert s to ns
             return :timeout
         end
     end
     :incomplete
 end
 
-function verified_affine_vector(C::MonodromyCache, ŷ, x, options)
-    # We distinguish solutions which have a distance larger than identical_tol
-    # But due to the numerical error in the evaluation of the distance, we need to be a little bit
-    # careful. Therefore, we require that the solutions should be one magnitude closer to
-    # the true solutions as necessary
-    tol = 0.1 * options.identical_tol
-    result = newton!(C.out, C.F, ŷ, euclidean_norm, C.newton_cache,
-                tol=tol, miniters=1, maxiters=3, simplified_last_step=false)
-
-    if isconverged(result)
-        return affine_chart(x, C.out)
-    else
-        return nothing
-    end
-end
-
 affine_chart(x::SVector, y::PVector) = ProjectiveVectors.affine_chart!(x, y)
 affine_chart(x::SVector{N, T}, y::AbstractVector) where {N, T} = SVector{N,T}(y)
 
-function process!(queue::Vector{<:Job}, job::Job, C::MonodromyCache, loop::Loop, options::MonodromyOptions, stats::MonodromyStatistics, progress)
-    retcode = track(C.tracker, job.x, job.edge, loop, stats)
-    if retcode ≠ CoreTrackerStatus.success
-        if retcode == CoreTrackerStatus.terminated_invalid_startvalue && stats.ntrackedpaths == 0
+function process!(queue, job::MonodromyJob, MS::MonodromySolver, progress)
+    x = solutions(MS)[job.id]
+    loop = MS.loops[job.loop_id]
+    retcode = track(MS.tracker, x, loop, MS.statistics)
+    if retcode ≠ PathTrackerStatus.success
+        if retcode == PathTrackerStatus.terminated_invalid_startvalue &&
+           MS.statistics.ntrackedpaths == 0
             return :invalid_startvalue
         end
         return :incomplete
     end
 
-    node = loop.nodes[job.edge.target]
+    y = solution(MS.tracker)
+    add_and_schedule!(MS, queue, y, job) && return :done
 
-    if node.main_node
-        y = verified_affine_vector(C, current_x(C.tracker), job.x, options)
-        # is the solution at infinity?
-        if y === nothing
-            return :incomplete
-        end
-    else
-        y = affine_chart(job.x, current_x(C.tracker))
-    end
-    next_edge = nextedge(loop, job.edge)
-    add_and_schedule!(node, queue, y, options, stats, next_edge) && return :done
-
-    if options.complex_conjugation
-        add_and_schedule!(node, queue, conj.(y), options, stats, next_edge) && return :done
+    if MS.options.complex_conjugation
+        add_and_schedule!(MS, queue, conj.(y), job) && return :done
     end
 
-    if !options.equivalence_classes && node.points !== nothing
-        apply_actions(options.group_actions, y) do yᵢ
-            add_and_schedule!(node, queue, yᵢ, options, stats, next_edge)
+    if !MS.options.equivalence_classes
+        apply_actions(MS.options.group_actions, y) do yᵢ
+            add_and_schedule!(MS, queue, yᵢ, job)
         end
     end
     return :incomplete
 end
 
 """
-    add_and_schedule!(node, queue::Vector{Job{N,T}}, y, options, stats, nextedge)
+    add_and_schedule!(MS, queue, y, job)
 
 Add `y` to the current `node` (if it not already exists) and schedule a new job to the `queue`.
 Returns `true` if we are done. Otherwise `false`.
 """
-function add_and_schedule!(node, queue::Vector{Job{N,T}}, y, options, stats, next_edge) where {N,T}
-    k = add!(node, y; tol=options.identical_tol)
-    if k == NOT_FOUND
+function add_and_schedule!(MS::MonodromySolver, queue, y, job::MonodromyJob) where {N,T}
+    k = add!(MS.solutions, y, Val(true); tol=MS.options.identical_tol)
+    if k == NOT_FOUND || k == NOT_FOUND_AND_REAL
         # Check if we are done
-        node.main_node && isdone(node, y, options) && return true
-        push!(queue, Job(SVector{N,T}(y), next_edge))
-    elseif k == NOT_FOUND_AND_REAL
-        # If we are on the main node check whether we have a real root.
-        if node.main_node
-            stats.nreal +=1
+        isdone(MS.solutions, y, MS.options) && return true
+        push!(queue, MonodromyJob(nsolutions(MS), job.loop_id))
+        # Schedule also on other loops
+        if MS.options.reuse_loops == :random && length(MS.loops) > 1
+            r_loop_id = rand(2:length(MS.loops))
+            if r_loop_id == job.loop_id
+                r_loop_id -= 1
+            end
+            push!(queue, MonodromyJob(nsolutions(MS), r_loop_id))
+        elseif MS.options.reuse_loops == :all
+            for r_loop_id in 1:length(MS.loops)
+                r_loop_id != job.loop_id || continue
+                push!(queue, MonodromyJob(nsolutions(MS), r_loop_id))
+            end
         end
-        # Check if we are done
-        node.main_node && isdone(node, y, options) && return true
-        push!(queue, Job(SVector{N,T}(y), next_edge))
-    elseif k === nothing
-        push!(queue, Job(SVector{N,T}(y), next_edge))
     end
+    MS.statistics.nreal += (k == NOT_FOUND_AND_REAL)
     false
 end
 
-function update_progress!(::Nothing, loop::Loop, statistics::MonodromyStatistics; finish=false)
+function update_progress!(::Nothing, nsolutions, statistics::MonodromyStatistics; finish=false)
     nothing
 end
-function update_progress!(progress, loop::Loop, statistics::MonodromyStatistics; finish=false)
-    nsolutions = length(solutions(loop))
+function update_progress!(progress, nsolutions, statistics::MonodromyStatistics; finish=false)
     ProgressMeter.update!(progress, nsolutions, showvalues=(
         ("# paths tracked", statistics.ntrackedpaths),
         ("# loops generated", statistics.nparametergenerations),
@@ -871,20 +750,18 @@ function update_progress!(progress, loop::Loop, statistics::MonodromyStatistics;
     nothing
 end
 
-function isdone(node::Node, x, options::MonodromyOptions)
-    !node.main_node && return false
-
-    options.done_callback(x, node.points) ||
-    length(node.points) ≥ options.target_solutions_count
+function isdone(solutions::UniquePoints, x, options::MonodromyOptions)
+    options.done_callback(x, solutions.points) ||
+    length(solutions) ≥ options.target_solutions_count
 end
 
-function regenerate_loop_and_schedule_jobs!(queue, loop::Loop, options::MonodromyOptions, stats::MonodromyStatistics)
-    sols = solutions(loop)
-    # create a new loop by regenerating the parameters (but don't touch our
-    # main node)
-    regenerate!(loop, options, stats)
-    for x in sols
-        push!(queue, Job(x, loop.edges[1]))
+function regenerate_loop_and_schedule_jobs!(queue, MS::MonodromySolver)
+    es = MS.loops[1].edges
+    loop = MonodromyLoop(MS.parameters, length(es), MS.options, weights=!isnothing(es[1].weights))
+    push!(MS.loops, loop)
+    for id in 1:nsolutions(MS)
+        push!(queue, MonodromyJob(id, length(MS.loops)))
     end
+    generated_parameters!(MS.statistics, nsolutions(MS))
     nothing
 end
