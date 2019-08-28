@@ -34,6 +34,8 @@ module HomotopyContinuation
     import .ProgressMeter
 
     include("utilities.jl")
+    include("norms.jl")
+    include("linear_algebra.jl")
     include("affine_patches.jl")
 
     include("systems_and_homotopies.jl")
