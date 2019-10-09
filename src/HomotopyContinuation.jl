@@ -1,5 +1,6 @@
 module HomotopyContinuation
 
+    import DoubleFloats
     import DynamicPolynomials
     import ElasticArrays
     import FixedPolynomials
@@ -14,13 +15,15 @@ module HomotopyContinuation
     import StaticPolynomials
     import TreeViews
 
-    import LinearAlgebra: cond
-    import Parameters: @pack!, @unpack
-    import DynamicPolynomials: @polyvar, subs, differentiate
-    import ProjectiveVectors: PVector
-    import StaticArrays: SVector, @SVector
-    import Test: @test
-    import MixedSubdivisions: mixed_volume
+    using Base: @propagate_inbounds
+    using LinearAlgebra: cond
+    using Parameters: @pack!, @unpack
+    using DoubleFloats: Double64, ComplexDF64
+    using DynamicPolynomials: @polyvar, subs, differentiate
+    using ProjectiveVectors: PVector
+    using StaticArrays: SVector, @SVector
+    using Test: @test
+    using MixedSubdivisions: mixed_volume
 
     const FP = FixedPolynomials
     const MP = MultivariatePolynomials
@@ -29,6 +32,7 @@ module HomotopyContinuation
     export @polyvar, subs, differentiate
     export mixed_volume
     export cond
+    export PVector
 
     include("progress_meter.jl")
     import .ProgressMeter
@@ -43,13 +47,16 @@ module HomotopyContinuation
     include("problems.jl")
     include("totaldegree.jl")
 
-    include("newton.jl")
     include("predictors.jl")
-    include("correctors.jl")
-
+    include("newton_corrector.jl")
     include("core_tracker.jl")
+
+    include("valuation.jl")
+    include("cauchy_endgame.jl")
     include("path_tracker.jl")
+    include("result.jl")
     include("polyhedral.jl")
-    include("solve.jl")
+    include("overdetermined.jl")
+    include("solver.jl")
     include("monodromy.jl")
 end

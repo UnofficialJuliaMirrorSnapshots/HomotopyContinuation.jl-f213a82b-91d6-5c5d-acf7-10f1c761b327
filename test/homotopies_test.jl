@@ -46,6 +46,10 @@
         H = ParameterHomotopy(F, vars[5:6], p₁=rand(2), p₀=rand(2))
         @test H isa AbstractHomotopy
         @test size(H) == (6, 4)
+        @test size(H, 1) == 6
+        @test size(H, 2) == 4
+        @test length(H) == 6
+        @test HC.nvariables(H) == 4
 
         HomotopyContinuation.homotopy_interface_test(H)
 
@@ -84,5 +88,14 @@
         H = CoefficientHomotopy(E, start, target)
         x = randn(ComplexF64, 2)
         HomotopyContinuation.homotopy_interface_test(H, x)
+    end
+
+    @testset "ConstantHomotopy" begin
+        F = SPSystem(equations(katsura(5)))
+        H = ConstantHomotopy(F)
+        @test H isa AbstractHomotopy
+        @test size(H) == (6, 6)
+
+        HomotopyContinuation.homotopy_interface_test(H)
     end
 end
