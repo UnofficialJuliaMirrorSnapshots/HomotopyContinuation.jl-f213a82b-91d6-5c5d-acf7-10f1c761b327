@@ -99,6 +99,7 @@ struct Result{V}
     pathresults::Vector{PathResult{V}}
     tracked_paths::Int
     seed::Int
+    retracked_paths::Int
     multiplicity_info::Base.RefValue{MultiplicityInfo}
 end
 
@@ -106,11 +107,12 @@ function Result(
     pathresults::Vector{PathResult{V}},
     tracked_paths::Int,
     seed::Int;
-    multiplicity_tol = 1e-6,
+    retracked_paths::Int = 0,
+    multiplicity_tol::Float64 = 1e-6,
 ) where {V}
     multiplicity_info = MultiplicityInfo(pathresults; tol = multiplicity_tol)
     assign_multiplicities!(pathresults, multiplicity_info)
-    Result(pathresults, tracked_paths, seed, Ref(multiplicity_info))
+    Result(pathresults, tracked_paths, seed, retracked_paths, Ref(multiplicity_info))
 end
 
 Base.length(r::Result) = length(r.pathresults)
@@ -428,7 +430,7 @@ julia> real_solutions(result)
 ```
 """
 function real_solutions(result::Results; only_real = true, tol = 1e-6, kwargs...)
-    mapresults(r -> real.(solution(r)), result; only_real = true, real_tol = tol, kwargs...)
+    mapresults(real_vector ∘ solution, result; only_real = true, real_tol = tol, kwargs...)
 end
 @deprecate realsolutions(result; kwargs...) real_solutions(result; kwargs...)
 
@@ -551,12 +553,11 @@ TreeViews.hastreeview(::Result) = true
 TreeViews.hastreeview(::ProjectiveResult) = true
 TreeViews.numberofnodes(::Result) = 8
 TreeViews.numberofnodes(::ProjectiveResult) = 7
-TreeViews.treelabel(io::IO, x::Result, ::MIME"application/prs.juno.inline") =
-    print(
-        io,
-        "<span class=\"syntax--support syntax--type syntax--julia\">" *
-        "Result{$(solution_type(x))}" * "</span>",
-    )
+TreeViews.treelabel(io::IO, x::Result, ::MIME"application/prs.juno.inline") = print(
+    io,
+    "<span class=\"syntax--support syntax--type syntax--julia\">" *
+    "Result{$(solution_type(x))}" * "</span>",
+)
 
 function TreeViews.nodelabel(io::IO, x::Result, i::Int, ::MIME"application/prs.juno.inline")
     s = statistics(x)

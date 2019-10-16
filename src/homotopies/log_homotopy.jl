@@ -3,7 +3,7 @@ export LogHomotopy
 """
     LogHomotopy(H::AbstractHomotopy)
 
-Reparameterizes the homotopy ``H(x,t)`` as ``Ĥ(x,s) := H(x,e^{-s})``.
+Reparametrizes the homotopy ``H(x,t)`` as ``Ĥ(x,s) := H(x,e^{-s})``.
 """
 struct LogHomotopy{H<:AbstractHomotopy} <: AbstractHomotopy
     homotopy::H
@@ -35,11 +35,25 @@ end
     u
 end
 
-@propagate_inbounds function evaluate_and_jacobian!(u, U, H::LogHomotopy, x, s, c::LogHomotopyCache)
+@propagate_inbounds function evaluate_and_jacobian!(
+    u,
+    U,
+    H::LogHomotopy,
+    x,
+    s,
+    c::LogHomotopyCache,
+)
     evaluate_and_jacobian!(u, U, H.homotopy, x, exp(-s), c.cache)
 end
 
-@propagate_inbounds function jacobian_and_dt!(U, u, H::LogHomotopy, x, s, c::LogHomotopyCache)
+@propagate_inbounds function jacobian_and_dt!(
+    U,
+    u,
+    H::LogHomotopy,
+    x,
+    s,
+    c::LogHomotopyCache,
+)
     t = exp(-s)
     jacobian_and_dt!(U, u, H.homotopy, x, t, c.cache)
     LinearAlgebra.rmul!(u, -t)

@@ -1,4 +1,4 @@
-export Solver, solver_startsolutions, solve!, solve
+export Solver, solver_startsolutions, solver, solve
 
 ###########
 ## STATS ##
@@ -17,6 +17,8 @@ function init!(SS::SolveStats)
 end
 
 function update!(stats::SolveStats, R::PathResult)
+    is_success(R) || return stats
+
     if is_singular(R)
         stats.singular_real += is_real(R)
         stats.singular += 1
@@ -27,153 +29,120 @@ function update!(stats::SolveStats, R::PathResult)
     stats
 end
 
+function consolidated_stats(stats::Vector{SolveStats})
+    (
+     regular = sum(s.regular for s in stats),
+     regular_real = sum(s.regular_real for s in stats),
+     singular = sum(s.singular for s in stats),
+     singular_real = sum(s.singular_real for s in stats),
+    )
+end
+
 ######################
 ## PathJumpingCheck ##
 ######################
-struct PathJumpingCheck{UP<:UniquePoints}
-    checkpoint::UP
-    duplicate_id::Base.RefValue{Int}
-    tol::Base.RefValue{Float64}
-    # A vector mapping the start solutions to the index in the checkpoint
-    # This is initially 1:1 but can change due to rerunning of paths
-    solution_mapping::Vector{Int}
-end
-
-function PathJumpingCheck(prob::AbstractProblem, n::Int, tol::Float64)
-    checkpoint = UniquePoints(
-        tracking_vector_type(prob),
-        (x, y) -> distance(x, y, InfNorm());
-        check_real = false,
-    )
-    rtol = Ref(tol)
-    duplicate_id = Ref(0)
-    solution_mapping = Vector(1:n)
-    PathJumpingCheck(checkpoint, duplicate_id, rtol, solution_mapping)
-end
-
-function init!(check::PathJumpingCheck, n::Integer)
-    check.solution_mapping .= 1:n
-    empty!(check.checkpoint)
-    check
-end
-
-function duplicate_check(x, check::PathJumpingCheck)
-    id = add!(check.checkpoint, copy(x), Val(true); tol = check.tol[])
-    check.duplicate_id[] = id
-    id == NOT_FOUND
-end
-
-function track_with_pathjumping_check!(
-    results::Vector,
-    tracker,
-    S::AbstractVector,
-    k::Integer,
-    check::PathJumpingCheck;
-    path_result_details::Symbol = :default,
-    save_all_paths::Bool = false,
-)
-    path_number = k
-    return_code = track!(tracker, S[k])
-
-    if is_terminated_callback(return_code)
-        # read out the other path to be considered
-        j = check.solution_mapping[check.duplicate_id[]]
-
-        # rerun paths and decrease max_correctors first to 2 then to 1.
-        max_corrector_iters = min(3, tracker.default_ct_options.max_corrector_iters)
-        accuracy = min(tracker.default_ct_options.accuracy, 1e-7)
-        while max_corrector_iters > 1
-            max_corrector_iters -= 1
-            return_code = track!(
-                tracker,
-                S[k];
-                accuracy = accuracy,
-                max_corrector_iters = max_corrector_iters,
-            )
-            # Still duplicate?
-            if is_terminated_callback(return_code)
-                # If we still have duplicate
-                # we assume that we can take the result of path j
-                Rⱼ = results[j]
-                if Rⱼ === nothing
-                    results[k] = nothing
-                else
-                    Rⱼ.path_number[] = k
-                    results[k] = Rⱼ
-                end
-                # clear the other result
-                results[j] = nothing
-                # rerun other path
-                return_code = track!(
-                    tracker,
-                    S[j];
-                    accuracy = accuracy,
-                    max_corrector_iters = max_corrector_iters,
-                )
-                path_number = j
-                if !is_terminated_callback(return_code)
-                    check.solution_mapping[k] = j
-                    break
-                else
-                    # TODO: This currently assumes that we can resolve the jump immediately
-                    # But it can happen that we have to resolve this recursively
-                    # if path j is now on the correct path, but there is a new collision
-                    # from another previous path
-                end
-            else
-                check.solution_mapping[k] = length(check.checkpoint)
-                break
+function path_jumping_candidates(
+    results::Vector{Union{Nothing,PathResult{V}}},
+    tol::Float64,
+) where {V}
+    index_map = Int[]
+    S = Vector{V}()
+    for (i, r) in enumerate(results)
+        if r !== nothing
+            s = r.intermediate_solution
+            if s !== nothing
+                push!(S, s)
+                push!(index_map, i)
             end
         end
-    else
-        check.solution_mapping[k] = length(check.checkpoint)
     end
-    return_code, path_number
-end
 
+    clusters = multiplicities(S; tol = tol)
+    indices = Int[]
+    for cluster in clusters, i in cluster
+        push!(indices, index_map[i])
+    end
+    indices
+end
 
 ############
 ## SOLVER ##
 ############
 
-struct Solver{PT<:AbstractPathTracker,UP<:UniquePoints}
-    trackers::PT
-    stats::SolveStats
-    path_jumping_check::PathJumpingCheck{UP}
-end
+"""
+    Solver(pathtracker::PathTracker)
 
+A `Solver` is a wrapper around a given `pathtracker` to track multiple paths.
+It provides on top of the given `pathtracker` parallelization and an optional path jumping check.
+To construct a  `Solver` it is convenient to use the [`solver`](@ref) or
+[`solver_startsolutions`](@ref) functions. Given a solver one can use the [`solve`](@ref)
+function to solve a system. This struct is constructed for any call to `solve` unless
+already explicitly provided.
+
+## Example
+
+Assume we want to solve a polynomial system repeatedly for many different values of the
+parameters `p`.
+The following example shows how to use a `Solver` to avoid some computational overhead
+compared to naively calling [`solve`](@ref).
+
+```julia
+@polyvar x y z p[1:3]
+F = [
+    x + 3 + 2y + 2 * y^2 - p[1],
+    (x - 2 + 5y) * z + 4 - p[2] * z,
+    (x + 2 + 4y) * z + 5 - p[3] * z,
+]
+q = randn(ComplexF64, 3)
+S = solutions(solve(subs(F, p => q)))
+# create some fake parameter values
+params = [randn(3) for _ = 1:1000]
+# create a `Solver` to reuse for the path tracking
+F_solver = solver(F; parameters = p, generic_parameters = q)
+# solve the system F for all paramaters p in params
+params_solutions = map(params) do p
+    solutions(solve(F_solver, S; target_parameters = p))
+end
+```
+"""
+struct Solver{PT<:AbstractPathTracker}
+    trackers::Vector{PT}
+    stats::Vector{SolveStats}
+end
+Solver(tracker::AbstractPathTracker) = Solver([tracker], [SolveStats()])
 function Solver(prob::AbstractProblem, start_solutions; kwargs...)
-    # tol is only available after we constructed tracker
-    path_jumping_check = PathJumpingCheck(prob, length(start_solutions), Inf)
-    tracker = construct_tracker(
-        prob,
-        start_solutions;
-        endgame_start_callback = duplicate_check,
-        endgame_start_callback_state = path_jumping_check,
-        kwargs...,
-    )
-    path_jumping_check.tol[] = accuracy(tracker)
-
-    Solver(tracker, SolveStats(), path_jumping_check)
+    Solver(construct_tracker(prob, start_solutions; kwargs...))
 end
 
-function Solver(tracker::AbstractPathTracker, checkpoint::UniquePoints)
-    Solver(tracker, SolveStats(), checkpoint)
-end
+"""
+    solver_startsolutions(args...; kwargs...)
 
+Create a [`Solver`] and start solutions. Takes almost the same arguments as [`solve`].
+"""
 function solver_startsolutions(args...; kwargs...)
     supported, rest = splitkwargs(kwargs, problem_startsolutions_supported_keywords)
     prob, start_solutions = problem_startsolutions(args...; supported...)
     Solver(prob, start_solutions; rest...), start_solutions
 end
 
-accuracy(T::PathTracker) = T.options.min_accuracy
+"""
+    solver(args...; kwargs...)
+
+Create a [`Solver`]. Takes almost the same arguments as [`solve`].
+"""
+solver(args...; kwargs...) = first(solver_startsolutions(args...; kwargs...))
+
+min_accuracy(T::PathTracker) = T.options.min_accuracy
+min_accuracy(T::OverdeterminedTracker) = min_accuracy(T.tracker)
+min_accuracy(T::PolyhedralTracker) = min_accuracy(T.generic_tracker)
+
+accuracy(T::PathTracker) = T.default_ct_options.accuracy
 accuracy(T::OverdeterminedTracker) = accuracy(T.tracker)
 accuracy(T::PolyhedralTracker) = accuracy(T.generic_tracker)
 
-############
-## solve! ##
-############
+max_corrector_iters(T::PathTracker) = T.default_ct_options.max_corrector_iters
+max_corrector_iters(T::OverdeterminedTracker) = max_corrector_iters(T.tracker)
+max_corrector_iters(T::PolyhedralTracker) = max_corrector_iters(T.generic_tracker)
 
 const solve_supported_keywords = [
     :path_result_details,
@@ -185,149 +154,6 @@ const solve_supported_keywords = [
             # deprecated
     :report_progress,
 ]
-
-"""
-    solve!(solver::Solver, start_solutions;
-        show_progress = true,
-        path_result_details = :default,
-        save_all_paths = false,
-        path_jumping_check = true)
-
-Solve the problem encoded in `solver` for the given start solutions `start_solutions`.
-"""
-function solve!(
-    solver::Solver,
-    start_solutions;
-    show_progress::Bool = true,
-    stop_early_cb = nothing,
-    kwargs...,
-)
-    if show_progress
-        n = length(start_solutions)
-        progress = ProgressMeter.Progress(
-            n;
-            dt = 0.1,
-            desc = "Tracking $n paths... ",
-            clear_output_ijulia = true,
-            delay = 0.3,
-        )
-    else
-        progress = nothing
-    end
-    solve!(solver, start_solutions, progress, stop_early_cb; kwargs...)
-end
-
-function solve!(
-    solver::Solver,
-    start_solutions,
-    progress::Union{Nothing,ProgressMeter.Progress},
-    stop_early_cb = nothing;
-    path_result_details::Symbol = :default,
-    save_all_paths::Bool = false,
-    path_jumping_check::Bool = true,
-    threading::Bool = true,
-)
-    @unpack trackers, stats = solver
-    tracker = trackers
-
-    S = collect_startsolutions(start_solutions)
-    n = length(S)
-
-    init!(stats)
-    init!(solver.path_jumping_check, n)
-    prepare!(tracker, start_solutions)
-
-    results = Vector{Union{Nothing,result_type(tracker)}}(undef, n)
-    results .= nothing
-
-    ntracked = 0
-    n_blas_threads = single_thread_blas()
-
-    try
-        for k = 1:n
-            if path_jumping_check
-                return_code, path_number = track_with_pathjumping_check!(
-                    results,
-                    tracker,
-                    S,
-                    k,
-                    solver.path_jumping_check;
-                    path_result_details = path_result_details,
-                    save_all_paths = save_all_paths,
-                )
-            else
-                return_code = track!(tracker, S[k])
-                path_number = k
-            end
-
-            ntracked = k
-
-            if save_all_paths ||
-               is_success(return_code) || is_invalid_startvalue(return_code)
-                result = PathResult(
-                    tracker,
-                    S[path_number],
-                    path_number;
-                    details = path_result_details,
-                )
-                results[path_number] = result
-                if stop_early_cb !== nothing
-                    if is_success(result) && stop_early_cb(result)
-                        break
-                    end
-                end
-            end
-
-            is_success(return_code) && update!(stats, results[path_number])
-            ntracked % 32 == 0 && update_progress!(progress, ntracked, stats)
-        end
-        # don't print if it already got printed above
-        ntracked % 32 != 0 && update_progress!(progress, ntracked, stats)
-    catch e
-        if !isa(e, InterruptException)
-            rethrow()
-        end
-    end
-
-    n_blas_threads > 1 && set_num_BLAS_threads(n_blas_threads)
-
-    Result(
-        remove_nothings(results),
-        ntracked,
-        seed(tracker);
-        multiplicity_tol = 10 * accuracy(tracker),
-    )
-end
-
-prepare!(PT::PathTracker, S) = PT
-collect_startsolutions(x::AbstractVector) = x
-collect_startsolutions(x) = collect(x)
-
-function update_progress!(progress, ntracked, stats::SolveStats; finished::Bool = false)
-    progress === nothing && return nothing
-
-    nsols = stats.regular + stats.singular
-    nreal = stats.regular_real + stats.singular_real
-
-    showvalues = (
-        ("# paths tracked", ntracked),
-        ("# non-singular solutions (real)", "$(stats.regular) ($(stats.regular_real))"),
-        ("# singular solutions (real)", "$(stats.singular) ($(stats.singular_real))"),
-        ("# total solutions (real)", "$nsols ($nreal)"),
-    )
-
-    ProgressMeter.update!(progress, ntracked; showvalues = showvalues)
-    nothing
-end
-
-function remove_nothings(v::Vector{Union{Nothing,T}}) where {T}
-    w = T[]
-    for vᵢ in v
-        !isnothing(vᵢ) && push!(w, vᵢ)
-    end
-    w
-end
-
 
 """
     solve(args...; options...)::Result
@@ -384,8 +210,12 @@ Additionally the following options are allowed:
   vector of `MultivariatePolynomials.AbstractPolynomial`s and `variables` determines the
   variable ordering. If you experience significant compilation times,
   consider to change system to `FPSystem`.
+* `system_scaling` (default `:equations`) Whether to apply an automatic scaling of
+  the equations (:equations), of the equations and variables (`:equations_and_variables`) or
+  no scaling at all (`nothing`).
 * `threading` (default `true`): Enable or disable multi-threading. The number of threads used
   is controlled by the environment variable `JULIA_NUM_THREADS`.
+* `variable_ordering`: Provide a custom ordering of the variables.
 
 # Examples
 
@@ -556,5 +386,297 @@ function.
 function solve(args...; kwargs...)
     solve_kwargs, rest = splitkwargs(kwargs, solve_supported_keywords)
     solver, start_solutions = solver_startsolutions(args...; rest...)
-    solve!(solver, start_solutions; solve_kwargs...)
+    solve(solver, start_solutions; solve_kwargs...)
+end
+
+function solve(
+    solver::Solver,
+    start_solutions;
+    show_progress::Bool = true,
+    stop_early_cb = nothing,
+    kwargs...,
+)
+    if show_progress
+        n = length(start_solutions)
+        progress = ProgressMeter.Progress(
+            n;
+            dt = 0.1,
+            desc = "Tracking $n paths... ",
+            clear_output_ijulia = true,
+            barlen = 40,
+            delay = 0.3,
+        )
+    else
+        progress = nothing
+    end
+    solve(solver, start_solutions, progress, stop_early_cb; kwargs...)
+end
+
+function solve(
+    solver::Solver,
+    start_solutions,
+    progress::Union{Nothing,ProgressMeter.Progress},
+    stop_early_cb = nothing;
+    path_result_details::Symbol = :default,
+    save_all_paths::Bool = false,
+    path_jumping_check::Bool = true,
+    threading::Bool = true,
+    start_parameters = nothing,
+    target_parameters = nothing,
+)
+    @unpack trackers, stats = solver
+
+    Threads.resize_nthreads!(trackers)
+    Threads.resize_nthreads!(stats)
+
+    if start_parameters !== nothing
+        for tracker in trackers
+            start_parameters!(tracker, start_parameters)
+        end
+    end
+    if target_parameters !== nothing
+        for tracker in trackers
+            target_parameters!(tracker, target_parameters)
+        end
+    end
+
+    S = collect_startsolutions(start_solutions)
+    n = length(S)
+
+    for i = 1:Threads.nthreads()
+        prepare!(trackers[i], start_solutions)
+        init!(stats[i])
+    end
+
+    results = Vector{Union{Nothing,result_type(trackers[1])}}(undef, n)
+    results .= nothing
+
+    retracked_paths = 0
+    n_blas_threads = single_thread_blas()
+    try
+        track_parallel!(
+            results,
+            trackers,
+            S,
+            1:n,
+            stop_early_cb,
+            stats,
+            progress;
+            path_result_details = path_result_details,
+            threading = threading,
+        )
+
+        if path_jumping_check
+            tol = accuracy(trackers[1])
+            indices = path_jumping_candidates(results, tol)
+            max_correctors = max_corrector_iters(trackers[1])
+            acc = min(accuracy(trackers[1]), 1e-7)
+            retracked_paths = length(indices)
+            if !isempty(indices) && max_correctors > 1
+                track_parallel!(
+                    results,
+                    trackers,
+                    S,
+                    indices;
+                    threading = threading,
+                    max_corrector_iters = max_correctors - 1,
+                    accuracy = acc,
+                )
+            end
+        end
+    catch e
+        if !isa(e, InterruptException)
+            rethrow()
+        end
+    end
+
+    n_blas_threads > 1 && set_num_BLAS_threads(n_blas_threads)
+    ntracked = count(!isnothing, results)
+    final_results = remove_nothings(results)
+    if !save_all_paths
+        filter!(
+            r -> r.return_code == :success || r.return_code == :terminated_invalid_startvalue,
+            final_results,
+        )
+    end
+    Result(
+        final_results,
+        ntracked,
+        seed(trackers[1]);
+        retracked_paths = retracked_paths,
+        multiplicity_tol = min_accuracy(trackers[1]),
+    )
+end
+
+
+function track_parallel!(
+    results,
+    trackers,
+    S,
+    range,
+    stop_early_cb = nothing,
+    stats = nothing,
+    progress = nothing;
+    threading::Bool = true,
+    max_corrector_iters::Union{Nothing,Int} = nothing,
+    accuracy::Union{Nothing,Float64} = nothing,
+    path_result_details::Symbol = :default,
+)
+    if threading && Threads.nthreads() > 1
+        nthreads = Threads.nthreads()
+        ntrackeds = fill(0, nthreads)
+        interrupted = Ref(false)
+        last_printed = Ref(0)
+
+        @static if VERSION > v"1.3-"
+            # create jobs channel
+            jobs = Channel{Int}(length(range))
+            for i in range
+                put!(jobs, i)
+            end
+            close(jobs)
+
+            # spawn workers which will track the paths
+            @sync for _ = 1:nthreads
+                Threads.@spawn begin
+                    try
+                        tid = Threads.threadid()
+                        for i in jobs
+                            results[i] = track(
+                                trackers[tid],
+                                S[i];
+                                path_number = i,
+                                details = path_result_details,
+                                max_corrector_iters = max_corrector_iters,
+                                accuracy = accuracy,
+                            )
+                            if is_success(results[i]) && stop_early_cb !== nothing
+                                interrupted[] = stop_early_cb(results[i])
+                            end
+
+                            stats !== nothing && update!(stats[tid], results[i])
+                            ntrackeds[tid] += 1
+
+                            if progress !== nothing
+                                ntracked = sum(ntrackeds)
+                                if tid == 1 && ntracked - last_printed[] - 32nthreads > 0
+                                    last_printed[] = ntracked
+                                    update_progress!(
+                                        progress,
+                                        ntracked,
+                                        consolidated_stats(stats),
+                                    )
+                                end
+                            end
+                            if interrupted[]
+                                break
+                            end
+                        end
+                    catch e
+                        if isa(e, InterruptException)
+                            interrupted[] = true
+                        else
+                            rethrow()
+                        end
+                    end
+                end
+            end
+        else
+            Threads.@threads for i in range
+                try
+                    tid = Threads.threadid()
+                    results[i] = track(
+                        trackers[tid],
+                        S[i];
+                        path_number = i,
+                        max_corrector_iters = max_corrector_iters,
+                        details = path_result_details,
+                        accuracy = accuracy,
+                    )
+                    if is_success(results[i]) && stop_early_cb !== nothing
+                        interrupted[] = stop_early_cb(results[i])
+                    end
+
+                    stats !== nothing && update!(stats[tid], results[i])
+                    ntrackeds[tid] += 1
+
+                    if progress !== nothing
+                        ntracked = sum(ntrackeds)
+                        if tid == 1 && ntracked - last_printed[] - 32nthreads > 0
+                            last_printed[] = ntracked
+                            update_progress!(progress, ntracked, consolidated_stats(stats))
+                        end
+                    end
+                    if interrupted[]
+                        break
+                    end
+                catch e
+                    if isa(e, InterruptException)
+                        interrupted[] = true
+                    else
+                        rethrow()
+                    end
+                end
+            end
+        end
+
+        if progress !== nothing && last_printed != sum(ntrackeds)
+            update_progress!(progress, sum(ntrackeds), consolidated_stats(stats))
+        end
+    else
+        ntracked = 0
+        for i in range
+            results[i] = track(
+                trackers[1],
+                S[i];
+                path_number = i,
+                max_corrector_iters = max_corrector_iters,
+                details = path_result_details,
+                accuracy = accuracy,
+            )
+            stats !== nothing && update!(stats[1], results[i])
+            ntracked += 1
+            if ntracked % 32 == 0 && stats !== nothing
+                update_progress!(progress, ntracked, stats[1])
+            end
+
+            if is_success(results[i]) &&
+               stop_early_cb !== nothing && stop_early_cb(results[i])
+                break
+            end
+        end
+        if ntracked % 32 != 0 && stats !== nothing
+            update_progress!(progress, ntracked, stats[1])
+        end
+    end
+    results
+end
+
+prepare!(PT::PathTracker, S) = PT
+collect_startsolutions(x::AbstractVector) = x
+collect_startsolutions(x) = collect(x)
+
+function update_progress!(progress, ntracked, stats)
+    progress === nothing && return nothing
+
+    nsols = stats.regular + stats.singular
+    nreal = stats.regular_real + stats.singular_real
+
+    showvalues = (
+        ("# paths tracked", ntracked),
+        ("# non-singular solutions (real)", "$(stats.regular) ($(stats.regular_real))"),
+        ("# singular solutions (real)", "$(stats.singular) ($(stats.singular_real))"),
+        ("# total solutions (real)", "$nsols ($nreal)"),
+    )
+
+    ProgressMeter.update!(progress, ntracked; showvalues = showvalues)
+    nothing
+end
+
+function remove_nothings(v::Vector{Union{Nothing,T}}) where {T}
+    w = T[]
+    for vᵢ in v
+        !isnothing(vᵢ) && push!(w, vᵢ)
+    end
+    w
 end

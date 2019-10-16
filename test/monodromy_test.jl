@@ -30,6 +30,7 @@
             parameters = p,
             target_solutions_count = 21,
             max_loops_no_progress = 20,
+            threading = false,
         )
         @test is_success(result)
         @test length(solutions(result)) == 21
@@ -47,9 +48,22 @@
             parameters = p,
             target_solutions_count = 21,
             max_loops_no_progress = 20,
+            threading = false,
             seed = result.seed,
         )
         @test result2.statistics.ntrackedpaths == result.statistics.ntrackedpaths
+
+        result = monodromy_solve(
+            F,
+            x₀,
+            p₀,
+            parameters = p,
+            target_solutions_count = 21,
+            max_loops_no_progress = 20,
+            threading = true,
+        )
+        @test is_success(result)
+        @test length(solutions(result)) == 21
 
         # test that timeout works
         result_timeout = monodromy_solve(
@@ -71,14 +85,6 @@
         @test result.returncode == :invalid_startvalue
         result = monodromy_solve(F, [x₀, rand(6)], p₀, parameters = p)
         @test length(solutions(result)) == 21
-        result = monodromy_solve(
-            F,
-            [x₀, rand(6)],
-            p₀,
-            parameters = p,
-            check_startsolutions = false,
-        )
-        @test result.returncode == :invalid_startvalue
 
         # different distance function
         result = monodromy_solve(F, x₀, p₀, parameters = p, distance = (x, y) -> 0.0)
@@ -123,12 +129,11 @@
         )
         @test length(result.solutions) == 2
 
-        roots_of_unity(s) =
-            begin
-                t = cis(π * 2 / 3)
-                t² = t * t
-                (vcat(t * s[1], t * s[2], s[3:end]), vcat(t² * s[1], t² * s[2], s[3:end]))
-            end
+        roots_of_unity(s) = begin
+            t = cis(π * 2 / 3)
+            t² = t * t
+            (vcat(t * s[1], t * s[2], s[3:end]), vcat(t² * s[1], t² * s[2], s[3:end]))
+        end
 
         result = monodromy_solve(
             F,
@@ -385,5 +390,76 @@
             end
             @test is_complete
         end
+    end
+
+
+    @testset "monodromy - automatic start pair" begin
+        @polyvar x[1:4]
+        # declare the variables for the 3 points
+        @polyvar p[1:3, 1:3]
+        p₁, p₂, p₃ = p[:, 1], p[:, 2], p[:, 3]
+        quartic_monomials = monomials(sum(x)^4)
+        @polyvar c[1:35]
+        f = sum(c .* quartic_monomials)
+        ∇f = differentiate(f, x)
+        @polyvar u v
+        F = [
+            subs(f, x => [p₁; 1])
+            subs(f, x => [p₂; 1])
+            subs(f, x => [p₃; 1])
+            (subs(∇f, x => [p₁; 1]) - u * subs(∇f, x => [p₂; 1]))
+            (subs(∇f, x => [p₁; 1]) - v * subs(∇f, x => [p₃; 1]))
+        ]
+
+        x₀, c₀ = HC.find_start_pair(F, c)
+        @test norm([f([p₁; p₂; p₃; u; v] => x₀, c => c₀) for f in F]) < 1e-8
+
+        F1 = [subs(f, c[1] => 0.232) for f in F]
+        x₀, c₀ = HC.find_start_pair(F1, c[2:end])
+        @test norm([f([p₁; p₂; p₃; u; v] => x₀, c[2:end] => c₀) for f in F1]) < 1e-8
+
+        # only use a small target_solutions_count, this is just to test that we actually
+        # compute something
+        res = monodromy_solve(F; parameters = c, target_solutions_count = 50)
+        @test is_success(res)
+
+        # Example where we cannot compute a start pair naively.
+        @polyvar x y
+        f = (x^4 + y^4 - 1) * (x^2 + y^2 - 2) + x^5 * y
+        # define new variables u₁, u₂ and λ₁
+        @polyvar u[1:2] λ[1:1]
+        # define the jacobian of F
+        J = differentiate([f], [x, y])
+        # J' defines the transpose of J
+        C = [[x, y] - u - J' * λ; f]
+
+        @test_throws ArgumentError monodromy_solve(C; parameters = u)
+        @test_throws ArgumentError HC.find_start_pair(C, u)
+    end
+
+    @testset "projective" begin
+        @polyvar x y z a b c
+        f = x^2 + y^2 - z^2
+        l = a * x + b * y + c * z
+
+        v = PVector([-0.6 - 0.8im, -1.2 + 0.4im, 1])
+        res = monodromy_solve([f, l], v, [1, 2, 3]; parameters = [a, b, c])
+        @test is_heuristic_stop(res)
+        @test nsolutions(res) == 2
+        @test isempty(real_solutions(res))
+
+        @polyvar x y u v a b
+        f = [x * y - a * u * v, x^2 - b * u^2]
+        res = monodromy_solve(
+            f,
+            PVector([√2, 1], [√2, 1]),
+            [2, 2];
+            variable_groups = [[x, u], [y, v]],
+            parameters = [a, b],
+        )
+        @test is_heuristic_stop(res)
+        @test nsolutions(res) == 2
+        @test nreal(res) == 2
+        @test sum(fubini_study.(real_solutions(res), solutions(res))) ≈ 0.0 atol = 1e-6
     end
 end
